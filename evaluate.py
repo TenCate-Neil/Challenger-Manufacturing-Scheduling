@@ -139,7 +139,12 @@ def check_conservation(original_rolls, sequence):
     if not layouts_match:
         discrepancies.append("set of roll layouts changed during reordering")
 
-    # Physical quantities and totals must be preserved.
+    # Physical quantities and totals must be preserved. Summing the same
+    # values in a different order (extracted order vs optimised order) can
+    # differ in the last floating-point bit, because floating-point addition
+    # is not associative — e.g. 85646.1666666667 vs 85646.16666666669. That is
+    # not a real change in what is produced, so totals are compared rounded to
+    # 2 decimal places (the physical quantities are not tracked more finely).
     for field, label in (
         ("roll_qty", "physical_roll_qty"),
         ("mfg_roll_length_lf", "linear_feet_lf"),
@@ -147,7 +152,7 @@ def check_conservation(original_rolls, sequence):
     ):
         orig = _sum_field(original_rolls, field)
         seq = _sum_field(sequence, field)
-        match = orig == seq
+        match = round(orig, 2) == round(seq, 2)
         checks[label] = {"original": orig, "sequence": seq, "match": match}
         if not match:
             discrepancies.append(f"{label} changed: {orig} -> {seq}")

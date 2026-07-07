@@ -160,6 +160,17 @@ def main():
     import streamlit as st
 
     st.set_page_config(page_title="Roll Sequencing", layout="wide")
+
+    # TenCate branding, pinned to the top-left of the app. `st.logo` (Streamlit
+    # >= 1.35) places it in the top-left app chrome; on older versions there is
+    # no such API, so the wordmark is rendered at the top-left of the page.
+    logo_path = Path(__file__).resolve().parent / "assets" / "tencate_logo.svg"
+    if logo_path.exists():
+        if hasattr(st, "logo"):
+            st.logo(str(logo_path))
+        else:
+            st.columns([1, 4])[0].image(str(logo_path), width=160)
+
     st.title("Roll sequencing")
     st.write(
         "Upload a turf order workbook (the `FIELD LAYOUT` sheet). The app "
