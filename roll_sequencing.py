@@ -248,7 +248,12 @@ def join_orders(extractions):
     on the canonical threading profile, so layouts shared between files
     collapse together and file-local layouts stay separate; and Navision lot
     numbers are globally unique across files, so roll identity (conservation)
-    carries over unchanged.
+    carries over unchanged. The extractor's `layout_group` id, however, is
+    file-local — the same id in two workbooks names two different layouts —
+    so it is cleared on the joined roll copies. Grouping never used it (the
+    canonical profile decides), and leaving it in place would only trip the
+    Phase 2 extractor-consistency warnings on ids that were never meant to be
+    compared across files.
 
     Returns a combined extraction-shaped dict:
 
@@ -276,7 +281,7 @@ def join_orders(extractions):
             name = f"order {index + 1}"
             summaries.append(None)
         names.append(name)
-        rolls.extend(dict(roll, source_file=name)
+        rolls.extend(dict(roll, source_file=name, layout_group=None)
                      for roll in load_rolls(extracted))
 
     summary = {}

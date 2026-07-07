@@ -269,6 +269,23 @@ def test_combined_cross_check_catches_wrong_file_total():
     assert any("linear feet" in w for w in report["warnings"])
 
 
+def test_combined_evaluation_has_no_file_local_layout_group_warning():
+    # The extractor numbers layout_group per file, so in a combined order the
+    # same id legitimately names two different layouts. join_orders clears the
+    # file-local ids, so the Phase 2 extractor-consistency warning ("spans
+    # distinct layouts") must not fire on a clean two-file join.
+    ext_a = _extraction("A.xlsx", [_roll("A1", ("FG", 182), sort=1)])
+    ext_b = _extraction("B.xlsx", [_roll("B1", ("WHI", 182), sort=1)])
+    for extraction in (ext_a, ext_b):
+        for roll in extraction["rolls"]:
+            roll["layout_group"] = 3  # same file-local id, different layouts
+    combined = join_orders([ext_a, ext_b])
+    report = ev.evaluate(combined["rolls"], extraction=combined)
+    assert not any("layout_group" in w for w in report["warnings"]), \
+        report["warnings"]
+    assert report["conservation"]["passed"]
+
+
 def test_cross_check_catches_wrong_physical_roll_count():
     # The extractor's stated roll count disagrees with the summed roll_qty.
     rolls = _sample_rolls()  # roll_qty sums to 4
