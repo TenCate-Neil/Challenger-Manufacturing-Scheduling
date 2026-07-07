@@ -20,7 +20,7 @@ phase.
 
 Each roll is defined left to right from the front of the machine using the DIM
 columns. Each DIM segment carries a width (inches) and a colour/type code
-(e.g. `FG`, `WHI`). A roll therefore occupies a fixed width — commonly 182" —
+(e.g. `FG`, `WHI`). A roll therefore occupies a fixed width — always 182" —
 made up of one or more coloured segments.
 
 Examples:
