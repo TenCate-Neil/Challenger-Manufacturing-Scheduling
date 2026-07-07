@@ -82,6 +82,23 @@ def test_conservation_detects_changed_quantity():
     assert any("physical_roll_qty" in d for d in cons["discrepancies"])
 
 
+def test_conservation_tolerates_float_rounding_in_totals():
+    # Summing the same square footage in a different order can differ in the
+    # last floating-point bit; a reorder that preserves the rolls must still
+    # pass. {0.1, 0.2, 0.3} reproduces the associativity difference:
+    # (0.1 + 0.2) + 0.3 == 0.6000000000000001, but (0.3 + 0.2) + 0.1 == 0.6.
+    rolls = [_roll("A", ("BLU", 100), sf=0.1),
+             _roll("B", ("RED", 100), sf=0.2),
+             _roll("C", ("GRN", 100), sf=0.3)]
+    reordered = [rolls[2], rolls[1], rolls[0]]
+    orig_sum = ev._sum_field(rolls, "total_mfg_sf")
+    seq_sum = ev._sum_field(reordered, "total_mfg_sf")
+    assert orig_sum != seq_sum  # raw sums differ by a floating-point bit
+    cons = ev.check_conservation(rolls, reordered)
+    assert cons["passed"], cons["discrepancies"]
+    assert cons["checks"]["square_feet_sf"]["match"]
+
+
 def test_conservation_detects_altered_layout():
     rolls = _sample_rolls()
     tampered = [dict(r) for r in rolls]
