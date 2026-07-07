@@ -135,6 +135,96 @@ def test_differing_total_widths_warn_and_count_tail():
     assert warnings, "expected a width-mismatch warning"
 
 
+# --- join_orders (combining extraction results) ---------------------------
+def _extraction(name, rolls, mfg_summary=None, warnings=()):
+    """Minimal extraction-result dict in the shape the extractor emits (only
+    the fields join_orders reads)."""
+    out = {"source_file": name, "rolls": rolls, "roll_count": len(rolls)}
+    if mfg_summary is not None:
+        out["mfg_summary"] = mfg_summary
+    if warnings:
+        out["warnings"] = list(warnings)
+    return out
+
+
+def test_join_orders_concatenates_and_tags_copies():
+    # Rolls come out concatenated in input order, each tagged with the file it
+    # came from — on a copy, so the inputs stay untouched.
+    rolls_a = [_roll(("FG", 182)), _roll(("FG", 177), ("WHI", 5))]
+    rolls_b = [_roll(("WHI", 182))]
+    combined = rs.join_orders([_extraction("A.xlsx", rolls_a),
+                               _extraction("B.xlsx", rolls_b)])
+    assert combined["roll_count"] == 3
+    assert [r["segments"] for r in combined["rolls"]] == \
+        [r["segments"] for r in rolls_a + rolls_b]
+    assert [r["source_file"] for r in combined["rolls"]] == \
+        ["A.xlsx", "A.xlsx", "B.xlsx"]
+    # The original roll dicts gained no key.
+    for original in rolls_a + rolls_b:
+        assert set(original) == {"segments"}
+
+
+def test_join_orders_combined_name():
+    combined = rs.join_orders([_extraction("A.xlsx", []),
+                               _extraction("B.xlsx", [])])
+    assert combined["source_file"] == "A.xlsx + B.xlsx"
+    assert combined["source_files"] == ["A.xlsx", "B.xlsx"]
+
+
+def test_join_orders_accepts_bare_roll_lists():
+    # A bare list of rolls (no extraction dict) is a valid order; it is named
+    # by its 1-based position.
+    combined = rs.join_orders([[_roll(("FG", 182))],
+                               _extraction("B.xlsx", [_roll(("WHI", 182))]),
+                               [_roll(("FG", 100), ("WHI", 82))]])
+    assert combined["source_files"] == ["order 1", "B.xlsx", "order 3"]
+    assert [r["source_file"] for r in combined["rolls"]] == \
+        ["order 1", "B.xlsx", "order 3"]
+
+
+def test_join_orders_sums_mfg_summary():
+    combined = rs.join_orders([
+        _extraction("A.xlsx", [], mfg_summary={"mfg_rolls": 4, "mfg_lf": 100.5,
+                                               "mfg_sf": 1500}),
+        _extraction("B.xlsx", [], mfg_summary={"mfg_rolls": 6, "mfg_lf": 99.5,
+                                               "mfg_sf": 2500}),
+    ])
+    # 100.5 + 99.5 comes back as the clean whole number 200.
+    assert combined["mfg_summary"] == {"mfg_rolls": 10, "mfg_lf": 200,
+                                       "mfg_sf": 4000}
+
+
+def test_join_orders_partial_summary_fields_become_none():
+    # A field is summed only when every input states it numerically. A partial
+    # sum would raise a spurious mismatch downstream instead of catching a
+    # real one, so missing / non-numeric anywhere -> None for that field.
+    combined = rs.join_orders([
+        _extraction("A.xlsx", [], mfg_summary={"mfg_rolls": 4, "mfg_lf": 100,
+                                               "mfg_sf": "n/a"}),
+        _extraction("B.xlsx", [], mfg_summary={"mfg_rolls": 6}),
+    ])
+    assert combined["mfg_summary"]["mfg_rolls"] == 10
+    assert combined["mfg_summary"]["mfg_lf"] is None  # missing in B
+    assert combined["mfg_summary"]["mfg_sf"] is None  # non-numeric in A
+
+
+def test_join_orders_empty_input():
+    combined = rs.join_orders([])
+    assert combined["rolls"] == []
+    assert combined["roll_count"] == 0
+    assert combined["mfg_summary"] == {"mfg_rolls": None, "mfg_lf": None,
+                                       "mfg_sf": None}
+
+
+def test_join_orders_prefixes_warnings_with_source():
+    combined = rs.join_orders([
+        _extraction("A.xlsx", [], warnings=["width mismatch"]),
+        _extraction("B.xlsx", [], warnings=["odd colour code"]),
+    ])
+    assert combined["warnings"] == ["A.xlsx: width mismatch",
+                                    "B.xlsx: odd colour code"]
+
+
 def _run_standalone():
     tests = [v for name, v in sorted(globals().items())
              if name.startswith("test_") and callable(v)]

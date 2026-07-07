@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 
 from layout_graph import build_graph, expand_sequence
-from roll_sequencing import sequence_cost
+from roll_sequencing import _clean_number, join_orders, load_rolls, sequence_cost
 
 # Orders with at most this many distinct layouts are solved exactly with
 # Held–Karp. The DP is O(2^n * n^2) in time and O(2^n * n) in memory, so this
@@ -164,7 +164,15 @@ def _two_opt(order, matrix):
 
 def _or_opt(order, matrix):
     """Relocate short segments (length 1, 2, 3) to a better position. Catches
-    improvements 2-opt alone can miss."""
+    improvements 2-opt alone can miss.
+
+    Each candidate move is scored incrementally: relocating a segment only
+    breaks the two edges around it (plus the edge at the insertion point) and
+    creates three new ones, so the cost delta is O(1) to evaluate — a full
+    `path_cost` recompute per candidate made one pass O(n^3), which large
+    combined orders can't afford. The move is applied exactly when the delta
+    is an improvement, so accepted moves (and the final order) are identical
+    to the recompute-based form."""
     n = len(order)
     improved = True
     while improved:
@@ -175,12 +183,25 @@ def _or_opt(order, matrix):
             for i in range(0, n - seg_len + 1):
                 segment = order[i:i + seg_len]
                 rest = order[:i] + order[i + seg_len:]
+                prev = order[i - 1] if i > 0 else None
+                nxt = order[i + seg_len] if i + seg_len < n else None
+                # Removing the segment drops its boundary edges and joins the
+                # neighbours it leaves behind.
+                removed = (matrix[prev][segment[0]] if prev is not None else 0) \
+                    + (matrix[segment[-1]][nxt] if nxt is not None else 0)
+                join = matrix[prev][nxt] \
+                    if prev is not None and nxt is not None else 0
                 for pos in range(len(rest) + 1):
                     if pos == i:
                         continue  # same place
-                    candidate = rest[:pos] + segment + rest[pos:]
-                    if path_cost(matrix, candidate) + 1e-9 < path_cost(matrix, order):
-                        order = candidate
+                    before = rest[pos - 1] if pos > 0 else None
+                    after = rest[pos] if pos < len(rest) else None
+                    broken = matrix[before][after] \
+                        if before is not None and after is not None else 0
+                    added = (matrix[before][segment[0]] if before is not None else 0) \
+                        + (matrix[segment[-1]][after] if after is not None else 0)
+                    if (join - removed) + (added - broken) < -1e-9:
+                        order = rest[:pos] + segment + rest[pos:]
                         improved = True
                         break
                 if improved:
@@ -277,17 +298,75 @@ def optimise(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS, warnings=None):
 
 
 # --------------------------------------------------------------------------
+# Splitting a solved path into k manufacturing schedules
+# --------------------------------------------------------------------------
+def choose_cuts(transition_costs, k=None, threshold=None):
+    """Choose where to cut a solved open path into separate manufacturing
+    schedules. `transition_costs[i]` is the cost of the transition between
+    sequence positions i and i+1; the returned cut indices are ascending
+    positions in that list. Exactly one of `k` / `threshold` must be given:
+
+      - `k`: cut the k-1 most expensive transitions, giving k schedules (or
+        one per roll if k exceeds the sequence length). Ties are broken
+        toward the earlier transition so the result is deterministic.
+      - `threshold`: cut every transition whose cost strictly exceeds it —
+        "split where a changeover exceeds X inches".
+
+    Each schedule restarts from a fresh machine state (cost 0 at its start,
+    matching plan assumption 7), so the total cost drops by exactly the sum
+    of the removed transitions. Cutting the largest edges is therefore
+    optimal for partitioning *this fixed ordering* into k open paths. It is
+    not a proven global optimum over all assignments of rolls to k schedules
+    — the ordering was solved before the cuts — though the solved path
+    already clusters similar layouts, so its big changeovers are the natural
+    boundaries."""
+    if (k is None) == (threshold is None):
+        raise ValueError("give exactly one of k or threshold")
+    if threshold is not None:
+        return [i for i, cost in enumerate(transition_costs)
+                if cost > threshold]
+    if k < 1:
+        raise ValueError(f"k must be at least 1, got {k}")
+    ranked = sorted(range(len(transition_costs)),
+                    key=lambda i: (-transition_costs[i], i))
+    return sorted(ranked[:min(k - 1, len(transition_costs))])
+
+
+def split_guidance(transition_costs, max_k=None):
+    """Elbow data for choosing k: one row per k = 1..max_k with the total
+    cost after cutting the k-1 most expensive transitions and the marginal
+    saving one more cut (k -> k+1) would add.
+
+    The marginal savings are simply the transition costs in descending order,
+    so the total is non-increasing in k and each extra schedule saves no more
+    than the last — the natural k sits where the next saving stops being
+    worth a separate schedule. `max_k` defaults to one more than the number
+    of positive-cost transitions, past which further cuts save nothing."""
+    if max_k is None:
+        max_k = sum(1 for cost in transition_costs if cost > 0) + 1
+    max_k = max(1, min(max_k, len(transition_costs) + 1))
+    ranked = sorted(transition_costs, reverse=True)
+    remaining = sum(transition_costs)
+    rows = []
+    for k in range(1, max_k + 1):
+        saving = ranked[k - 1] if k - 1 < len(ranked) else 0
+        rows.append({
+            "k": k,
+            "total_cost_in": _clean_number(remaining),
+            "marginal_saving_in": _clean_number(saving),
+        })
+        remaining -= saving
+    return rows
+
+
+# --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
-def _report_file(path, exact_max_layouts):
-    from roll_sequencing import load_rolls
-
-    data = json.loads(Path(path).read_text())
-    rolls = load_rolls(data)
+def _report_rolls(label, rolls, exact_max_layouts):
     warnings = []
     result = optimise(rolls, exact_max_layouts=exact_max_layouts, warnings=warnings)
 
-    print(f"\n{path}")
+    print(f"\n{label}")
     print(f"  rolls:              {result['roll_count']}")
     print(f"  distinct layouts:   {result['distinct_layout_count']}")
     print(f"  method:             {result['method']} "
@@ -318,9 +397,21 @@ def main():
                         help="Solve exactly (Held–Karp) at or below this many "
                              "distinct layouts; use the heuristic above it "
                              f"(default {DEFAULT_EXACT_MAX_LAYOUTS}).")
+    parser.add_argument("--combine", action="store_true",
+                        help="Join all inputs into one combined order and "
+                             "sequence it as a single run, instead of "
+                             "sequencing each file on its own.")
     args = parser.parse_args()
+
+    if args.combine:
+        extractions = [json.loads(Path(path).read_text()) for path in args.files]
+        combined = join_orders(extractions)
+        _report_rolls(f"combined: {combined['source_file']}",
+                      combined["rolls"], args.exact_max_layouts)
+        return
     for path in args.files:
-        _report_file(path, args.exact_max_layouts)
+        data = json.loads(Path(path).read_text())
+        _report_rolls(path, load_rolls(data), args.exact_max_layouts)
 
 
 if __name__ == "__main__":

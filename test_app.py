@@ -16,7 +16,7 @@ Runs with pytest, or standalone:
 try:
     from streamlit.testing.v1 import AppTest
     import app  # noqa: F401  (also pulls in the extractor -> openpyxl)
-    from evaluate import evaluate
+    from evaluate import evaluate, split_report
     _HAVE_DEPS = True
 except Exception as _exc:  # noqa: BLE001
     _HAVE_DEPS = False
@@ -173,6 +173,119 @@ def test_build_run_sheet_pdf_bytes():
     assert bytes(pdf[:5]) == b"%PDF-"
     # A non-trivial document (header + legend + three rows) is well over 1 KB.
     assert len(pdf) > 1000
+
+
+def _extraction(name, rolls):
+    # A synthetic extraction dict shaped like `extract_workbook`'s output,
+    # with a correct MFG summary derived from the rolls (roll_qty, LF and SF
+    # summed the same way the evaluator's cross-check sums the sequence).
+    return {
+        "source_file": name,
+        "rolls": rolls,
+        "roll_count": len(rolls),
+        "mfg_summary": {
+            "mfg_rolls": sum(r["roll_qty"] for r in rolls),
+            "mfg_lf": sum(r["mfg_roll_length_lf"] for r in rolls),
+            "mfg_sf": sum(r["total_mfg_sf"] for r in rolls),
+        },
+        "warnings": [],
+    }
+
+
+def test_evaluate_combined_two_orders():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    # Two orders joined into one: the report must cover every roll from both
+    # files, stay a faithful reordering (conservation), name both sources,
+    # and — because the joined MFG summary sums are correct — raise no
+    # cross-check mismatch warning.
+    ext_a = _extraction("A.xlsx", [_roll("A1", ("FG", 182), sort=1, qty=2),
+                                   _roll("A2", ("FG", 177), ("WHI", 5), sort=2)])
+    ext_b = _extraction("B.xlsx", [_roll("B1", ("FG", 100), ("WHI", 82), sort=1)])
+    combined, report = app.evaluate_combined([ext_a, ext_b])
+
+    assert report["conservation"]["passed"], report["conservation"]
+    assert "A.xlsx" in report["source_file"]
+    assert "B.xlsx" in report["source_file"]
+    # Every roll in the combined sequence traces back to an input lot.
+    lots = [e["navision_lot"] for e in report["manufacturing_sequence"]]
+    assert sorted(lots) == ["A1", "A2", "B1"]
+    # The joined summary is the per-file sums; being correct, the evaluator's
+    # cross-check against it stays silent.
+    assert combined["mfg_summary"] == {"mfg_rolls": 4, "mfg_lf": 300,
+                                       "mfg_sf": 4500}
+    assert not any("MFG summary" in w for w in report["warnings"]), \
+        report["warnings"]
+
+
+def test_combined_collapses_shared_layouts():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    # The point of combined mode: a layout that appears in both files is one
+    # distinct layout in the joined order, so those rolls are produced back
+    # to back at no setup cost instead of being set up once per file.
+    ext_a = _extraction("A.xlsx", [_roll("A1", ("FG", 177), ("WHI", 5), sort=1),
+                                   _roll("A2", ("FG", 182), sort=2)])
+    ext_b = _extraction("B.xlsx", [_roll("B1", ("FG", 177), ("WHI", 5), sort=1)])
+    _, report = app.evaluate_combined([ext_a, ext_b])
+    # A1 and B1 share a layout signature -> two distinct layouts, not three.
+    assert report["distinct_layout_count"] == 2
+
+
+def test_split_schedules_feed_run_sheet_pdf():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    try:
+        import fpdf  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return  # skip: fpdf2 unavailable
+    # Each schedule from `split_report` is report-shaped, so it must feed the
+    # run-sheet renderer unchanged and yield a real PDF.
+    rolls = [_roll("L1", ("FG", 182), sort=1),
+             _roll("L2", ("FG", 177), ("WHI", 5), sort=2),
+             _roll("L3", ("FG", 100), ("WHI", 82), sort=3)]
+    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+    split = split_report(report, k=2)
+    assert split["schedule_count"] == 2
+    for schedule in split["schedules"]:
+        pdf = app.build_run_sheet_pdf(schedule["source_file"], schedule)
+        assert isinstance(pdf, (bytes, bytearray))
+        assert bytes(pdf[:5]) == b"%PDF-"
+
+
+# A harness that renders the split section on a real evaluate() report with
+# three distinct layouts, so the split UI path is exercised without a workbook.
+_SPLIT_HARNESS = """
+import streamlit as st
+import app
+from evaluate import evaluate
+
+def _roll(lot, *segs, sort=None):
+    return {"navision_lot": lot, "sort": sort, "roll_type": "FIELD",
+            "roll_qty": 1, "mfg_roll_length_lf": 100, "total_mfg_sf": 1500,
+            "layout_signature": "|".join(f"{w}{c}" for c, w in segs),
+            "layout_group": None,
+            "segments": [{"color_code": c, "width_in": w} for c, w in segs]}
+
+rolls = [_roll("L1", ("FG", 182), sort=1),
+         _roll("L2", ("FG", 177), ("WHI", 5), sort=2),
+         _roll("L3", ("FG", 177), ("WHI", 5), sort=3),
+         _roll("L4", ("FG", 100), ("WHI", 82), sort=4)]
+report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+app._render_split_section(st, report)
+"""
+
+
+def test_render_split_section_path():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    at = AppTest.from_string(_SPLIT_HARNESS).run(timeout=30)
+    assert not at.exception, at.exception
+    # The section heading rendered and the split-method radio exists, with
+    # "No split" as its default so nothing is cut until asked.
+    assert any("Split into schedules" in m.value for m in at.markdown)
+    assert len(at.radio) == 1
+    assert at.radio[0].value == "No split"
 
 
 def test_analyse_upload_rejects_non_workbook():

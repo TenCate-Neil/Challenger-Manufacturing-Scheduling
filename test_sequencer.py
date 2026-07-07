@@ -185,6 +185,126 @@ def test_optimise_matches_exact_when_forced_heuristic_small():
     assert heur["cost"] == exact["cost"]
 
 
+# --- Or-opt incremental delta ----------------------------------------------
+def test_or_opt_incremental_matches_full_recompute():
+    # The incremental O(1) delta accepts exactly the same moves as the old
+    # full-recompute form, so on any instance the two must return an
+    # *identical* order — not merely one of equal cost.
+    def _or_opt_reference(order, matrix):
+        order = list(order)
+        n = len(order)
+        improved = True
+        while improved:
+            improved = False
+            for seg_len in (1, 2, 3):
+                if seg_len >= n:
+                    continue
+                for i in range(0, n - seg_len + 1):
+                    segment = order[i:i + seg_len]
+                    rest = order[:i] + order[i + seg_len:]
+                    for pos in range(len(rest) + 1):
+                        if pos == i:
+                            continue
+                        candidate = rest[:pos] + segment + rest[pos:]
+                        if sq.path_cost(matrix, candidate) + 1e-9 < sq.path_cost(matrix, order):
+                            order = candidate
+                            improved = True
+                            break
+                    if improved:
+                        break
+                if improved:
+                    break
+        return order
+
+    rng = random.Random(4242)
+    for _ in range(30):
+        n = rng.randint(2, 9)
+        m = _random_symmetric_matrix(n, rng)
+        identity = list(range(n))
+        shuffled = identity[:]
+        rng.shuffle(shuffled)
+        for start in (identity, shuffled):
+            got = sq._or_opt(list(start), m)
+            want = _or_opt_reference(start, m)
+            assert got == want, (n, start, m)
+
+
+# --- choose_cuts ------------------------------------------------------------
+def test_choose_cuts_k_picks_largest_with_earlier_tie():
+    # k schedules need k-1 cuts at the largest costs; the 9-vs-9 tie breaks
+    # toward the earlier transition so the result is deterministic.
+    assert sq.choose_cuts([5, 9, 9, 3], k=2) == [1]
+    assert sq.choose_cuts([5, 9, 9, 3], k=3) == [1, 2]
+    assert sq.choose_cuts([5, 9, 9, 3], k=4) == [0, 1, 2]
+
+
+def test_choose_cuts_k_one_means_no_cuts():
+    assert sq.choose_cuts([5, 9, 3], k=1) == []
+
+
+def test_choose_cuts_k_clamps_to_one_schedule_per_roll():
+    # k beyond the sequence length just cuts every transition, no error.
+    assert sq.choose_cuts([5, 9, 3], k=99) == [0, 1, 2]
+
+
+def test_choose_cuts_threshold_is_strict():
+    costs = [5, 9, 0, 9]
+    assert sq.choose_cuts(costs, threshold=8) == [1, 3]
+    # cost == threshold is NOT cut — "strictly exceeds".
+    assert sq.choose_cuts(costs, threshold=9) == []
+    # threshold 0 cuts every positive transition but not the zero one.
+    assert sq.choose_cuts(costs, threshold=0) == [0, 1, 3]
+
+
+def test_choose_cuts_argument_validation():
+    for bad_call in (lambda: sq.choose_cuts([1, 2], k=2, threshold=1),
+                     lambda: sq.choose_cuts([1, 2]),
+                     lambda: sq.choose_cuts([1, 2], k=0)):
+        try:
+            bad_call()
+        except ValueError:
+            pass
+        else:
+            assert False, "expected ValueError"
+
+
+# --- split_guidance ---------------------------------------------------------
+def test_split_guidance_rows():
+    rows = sq.split_guidance([5, 0, 77, 3])
+    # Default max_k = positive transitions + 1 = 4.
+    assert [r["k"] for r in rows] == [1, 2, 3, 4]
+    # Row k's total is sum(costs) minus the k-1 largest costs...
+    assert [r["total_cost_in"] for r in rows] == [85, 8, 3, 0]
+    # ...and the marginal savings are the costs in descending order.
+    assert [r["marginal_saving_in"] for r in rows] == [77, 5, 3, 0]
+
+
+def test_split_guidance_max_k_clamps_and_pads_with_zero():
+    rows = sq.split_guidance([5, 0, 77, 3], max_k=99)
+    # Clamped to len(costs) + 1 = 5; savings hit 0 once costs are exhausted.
+    assert [r["k"] for r in rows] == [1, 2, 3, 4, 5]
+    assert [r["marginal_saving_in"] for r in rows] == [77, 5, 3, 0, 0]
+    assert rows[-1]["total_cost_in"] == 0
+
+
+def test_split_guidance_consistent_with_choose_cuts():
+    # Guidance row k must equal what actually cutting with choose_cuts(k)
+    # achieves: the summed per-schedule costs — one story, two functions.
+    rng = random.Random(42)
+    for _ in range(25):
+        n = rng.randint(1, 12)
+        costs = [rng.choice([0, rng.randint(1, 50)]) for _ in range(n)]
+        rows = sq.split_guidance(costs, max_k=n + 1)
+        totals = [r["total_cost_in"] for r in rows]
+        assert totals == sorted(totals, reverse=True)  # non-increasing
+        for row in rows:
+            cuts = sq.choose_cuts(costs, k=row["k"])
+            boundaries = [-1] + cuts + [n]
+            per_schedule = [sum(costs[a + 1:b])
+                            for a, b in zip(boundaries, boundaries[1:])]
+            assert sum(per_schedule) == row["total_cost_in"], (costs, row)
+
+
 def _run_standalone():
     tests = [v for name, v in sorted(globals().items())
              if name.startswith("test_") and callable(v)]

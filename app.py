@@ -33,28 +33,32 @@ from evaluate import (
     DEFAULT_EXACT_ORACLE_MAX_LAYOUTS,
     evaluate,
     report_json,
+    split_report,
 )
 from extract_turf_layout import TemplateMismatch, extract_workbook
-from roll_sequencing import _clean_number, parse_signature, profile_cost
+from roll_sequencing import (
+    _clean_number,
+    join_orders,
+    parse_signature,
+    profile_cost,
+)
+from sequencer import split_guidance
 
 
 # --------------------------------------------------------------------------
 # Pipeline (no Streamlit) — reused by the UI and testable on its own
 # --------------------------------------------------------------------------
-def analyse_upload(filename, file_bytes,
-                   exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
-                   oracle_max_layouts=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS):
-    """Run the full pipeline on one uploaded workbook's bytes.
+def _extract_upload(filename, file_bytes):
+    """Extract one uploaded workbook's bytes into an extraction dict.
 
     The extractor reads the workbook as a file path (it opens the underlying
     zip to resolve the embedded brand logo), so the bytes are written to a
     temporary file first. The temp file is closed before the extractor opens
     it and removed afterwards: on Windows a still-open `NamedTemporaryFile`
     cannot be reopened by another handle, which otherwise raises
-    "Permission denied". Returns `(extraction, report)`: the raw extraction
-    dict from `extract_turf_layout` and the Phase 4 evaluation report from
-    `evaluate`. Raises `TemplateMismatch` if the workbook is not a recognised
-    FIELD LAYOUT order."""
+    "Permission denied". The returned dict's `source_file` is the original
+    upload name rather than the temp file's. Raises `TemplateMismatch` if the
+    workbook is not a recognised FIELD LAYOUT order."""
     suffix = Path(filename).suffix or ".xlsx"
     fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     try:
@@ -69,7 +73,20 @@ def analyse_upload(filename, file_bytes,
 
     # Preserve the original file name rather than the temp file's.
     extraction["source_file"] = filename
+    return extraction
 
+
+def analyse_upload(filename, file_bytes,
+                   exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
+                   oracle_max_layouts=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS):
+    """Run the full pipeline on one uploaded workbook's bytes.
+
+    Extracts via `_extract_upload` (see there for the temp-file rationale),
+    then evaluates. Returns `(extraction, report)`: the raw extraction dict
+    from `extract_turf_layout` and the Phase 4 evaluation report from
+    `evaluate`. Raises `TemplateMismatch` if the workbook is not a recognised
+    FIELD LAYOUT order."""
+    extraction = _extract_upload(filename, file_bytes)
     report = evaluate(
         extraction.get("rolls", []),
         exact_max_layouts=exact_max_layouts,
@@ -77,6 +94,45 @@ def analyse_upload(filename, file_bytes,
         extraction=extraction,
     )
     return extraction, report
+
+
+def evaluate_combined(extractions,
+                      exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
+                      oracle_max_layouts=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS):
+    """Join several extracted orders into one and evaluate them together.
+
+    `join_orders` concatenates the rolls (each tagged with its source file,
+    so the combined sequence stays traceable to its workbook) and sums the
+    stated MFG totals, so `evaluate`'s cross-check compares the combined
+    sequence against the combined stated totals rather than any single
+    file's. Returns `(combined, report)`: the joined extraction-shaped dict
+    and the evaluation report over all rolls at once."""
+    combined = join_orders(extractions)
+    report = evaluate(
+        combined["rolls"],
+        exact_max_layouts=exact_max_layouts,
+        oracle_max_layouts=oracle_max_layouts,
+        extraction=combined,
+    )
+    return combined, report
+
+
+def analyse_uploads_combined(named_files,
+                             exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
+                             oracle_max_layouts=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS):
+    """Run the combined pipeline on several uploaded workbooks' bytes.
+
+    `named_files` is a list of `(filename, file_bytes)` pairs. Combined mode
+    joins all the uploads into one order and sequences them together, so
+    layouts shared between files are produced back to back instead of being
+    set up once per file. Returns `(combined, report)` as `evaluate_combined`
+    does. Raises `TemplateMismatch` if any workbook is not a recognised
+    FIELD LAYOUT order."""
+    extractions = [_extract_upload(filename, file_bytes)
+                   for filename, file_bytes in named_files]
+    return evaluate_combined(extractions,
+                             exact_max_layouts=exact_max_layouts,
+                             oracle_max_layouts=oracle_max_layouts)
 
 
 # --------------------------------------------------------------------------
@@ -625,7 +681,7 @@ def _draw_layout_breakdowns(pdf, report):
 # --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
-def _render_report(st, filename, extraction, report):
+def _render_report(st, filename, extraction, report, download_stem=None):
     quality = report["solution_quality"]
     conservation = report["conservation"]
     breakdown = report["transition_breakdown"]
@@ -714,7 +770,7 @@ def _render_report(st, filename, extraction, report):
     for warning in report["warnings"]:
         footer.warning(warning)
 
-    stem = Path(filename).stem
+    stem = download_stem or Path(filename).stem
     downloads = footer.columns(2)
     downloads[0].download_button(
         "Download sequence report (JSON)",
@@ -738,6 +794,103 @@ def _render_report(st, filename, extraction, report):
             file_name=f"{stem}.run-sheet.pdf",
             mime="application/pdf",
         )
+
+
+def _render_split_section(st, report):
+    """Cut the evaluated sequence into separate manufacturing schedules at its
+    most expensive changeovers. Each schedule restarts from a fresh machine
+    state, so the total setup cost drops by exactly the changeovers removed —
+    the best way to cut this fixed ordering into k runs, though not a re-solve
+    of the whole assignment (see `sequencer.choose_cuts`). The elbow view from
+    `split_guidance` shows what each extra schedule would save, so the choice
+    of k is informed rather than guessed."""
+    box = st.container(border=True)
+    box.markdown("#### Split into schedules")
+
+    costs = [e["change_cost_in"] for e in report["manufacturing_sequence"][1:]]
+    if not costs:
+        box.caption("The sequence has no transitions — there is nothing to "
+                    "split.")
+        return
+
+    box.caption(
+        "The combined sequence can be cut into separate manufacturing "
+        "schedules at its most expensive changeovers. Each schedule restarts "
+        "from a fresh machine state, so the total setup cost drops by exactly "
+        "the changeovers removed. This is the best way to cut this fixed "
+        "ordering into k runs — it is not a re-solve of the whole assignment "
+        "across schedules.")
+
+    # Elbow view: what each extra schedule saves, so k is chosen on evidence.
+    guidance = split_guidance(costs)
+    box.dataframe(
+        [{"k": row["k"],
+          "total cost (in)": row["total_cost_in"],
+          "saving from next cut (in)": row["marginal_saving_in"]}
+         for row in guidance],
+        hide_index=True)
+    box.caption("Total setup cost against the number of schedules (k) — the "
+                "elbow shows where one more schedule stops paying its way:")
+    box.line_chart(guidance, x="k", y="total_cost_in")
+
+    method = box.radio(
+        "Split method",
+        ["No split", "Number of schedules (k)",
+         "Changeover threshold (inches)"],
+        horizontal=True)
+
+    split = None
+    if method == "Number of schedules (k)":
+        k = box.number_input("Number of schedules (k)", min_value=1,
+                             max_value=len(costs) + 1, value=1)
+        split = split_report(report, k=int(k))
+    elif method == "Changeover threshold (inches)":
+        threshold = box.number_input(
+            "Split where a changeover exceeds (inches)",
+            min_value=0.0, value=float(max(costs)))
+        split = split_report(report, threshold=float(threshold))
+
+    if split is None:
+        return
+    if split["schedule_count"] < 2:
+        box.caption("The chosen split leaves a single schedule (the threshold "
+                    "sits at or above every changeover, or k is 1) — nothing "
+                    "was cut.")
+        return
+
+    summary = box.columns(3)
+    summary[0].metric("Cost before", f"{split['cost_before_in']} in")
+    summary[1].metric("Cost after", f"{split['cost_after_in']} in")
+    summary[2].metric("Total saving", f"{split['total_saving_in']} in")
+
+    count = split["schedule_count"]
+    for schedule in split["schedules"]:
+        index = schedule["schedule_index"]
+        sbox = box.container(border=True)
+        sbox.markdown(f"#### Schedule {index} of {count}")
+        metrics = sbox.columns(3)
+        metrics[0].metric("Roll rows", schedule["roll_count"])
+        metrics[1].metric("Distinct layouts",
+                          schedule["distinct_layout_count"])
+        metrics[2].metric("Setup cost", f"{schedule['achieved_cost_in']} in")
+        sbox.dataframe(schedule["manufacturing_sequence"], hide_index=True)
+
+        # The per-schedule run sheet needs fpdf2; where it is unavailable,
+        # fall back to a note rather than erroring, as `_render_report` does.
+        try:
+            pdf_bytes = build_run_sheet_pdf(schedule["source_file"], schedule)
+        except Exception as exc:  # noqa: BLE001
+            sbox.caption(
+                "Run sheet PDF needs fpdf2 — run `pip install fpdf2` to "
+                f"enable it ({exc}).")
+        else:
+            sbox.download_button(
+                "Download run sheet (PDF)",
+                data=pdf_bytes,
+                file_name=f"combined.schedule-{index}-of-{count}.run-sheet.pdf",
+                mime="application/pdf",
+                key=f"split-run-sheet-{index}-of-{count}",
+            )
 
 
 def main():
@@ -782,6 +935,54 @@ def main():
 
     if not uploads:
         st.info("Upload one or more `.xlsx` order workbooks to begin.")
+        return
+
+    mode = "Separate schedules"
+    if len(uploads) >= 2:
+        mode = st.radio(
+            "Multiple workbooks",
+            ["Separate schedules", "Combined"],
+            horizontal=True,
+            help="Separate schedules sequences each workbook on its own. "
+                 "Combined joins every upload into one order and sequences "
+                 "them together, so layouts shared between files are produced "
+                 "back to back; the combined run can then be split back into "
+                 "schedules at its most expensive changeovers.")
+
+    if mode == "Combined":
+        # Every workbook must extract cleanly before they can be joined; the
+        # per-file error UX matches the separate-schedules loop below.
+        extractions = []
+        any_failed = False
+        for upload in uploads:
+            try:
+                extractions.append(
+                    _extract_upload(upload.name, upload.getvalue()))
+            except TemplateMismatch as exc:
+                st.error(f"{upload.name}: not a recognised FIELD LAYOUT "
+                         f"workbook ({exc}).")
+                any_failed = True
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"{upload.name}: could not process ({exc}).")
+                any_failed = True
+        if any_failed:
+            st.warning("Combined mode needs every workbook to extract "
+                       "cleanly — fix or remove the files above, or switch "
+                       "to separate schedules.")
+            return
+
+        try:
+            combined, report = evaluate_combined(
+                extractions,
+                exact_max_layouts=int(exact_max_layouts),
+                oracle_max_layouts=int(oracle_max_layouts))
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not sequence the combined order ({exc}).")
+            return
+
+        _render_report(st, combined["source_file"], combined, report,
+                       download_stem="combined")
+        _render_split_section(st, report)
         return
 
     for upload in uploads:

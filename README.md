@@ -293,3 +293,51 @@ cleanly when Streamlit (or the extractor's `openpyxl`) is not installed:
 python test_app.py                 # standalone runner
 pytest test_app.py                 # if pytest is installed
 ```
+
+## Combined mode and splitting into k schedules
+
+Several orders can be joined and sequenced as one combined run.
+`join_orders(extractions)` (in `roll_sequencing.py`) concatenates the rolls of
+each extraction, tagging every roll with the `source_file` it came from, and
+carries all input file names in the combined `source_file`. Nothing else needs
+reconciling: Phase 2 groups on the canonical threading profile, so layouts
+shared between files collapse together automatically, and Navision lot numbers
+are globally unique across files, so conservation carries over unchanged. The
+combined `mfg_summary` sums `mfg_rolls` / `mfg_lf` / `mfg_sf` across the
+inputs, and Phase 4's cross-check compares those summed stated totals against
+the combined sequence — the same second-source conservation check as for a
+single file.
+
+```bash
+python evaluate.py A.json B.json --combine        # one combined report
+python sequencer.py A.json B.json --combine       # one combined sequence
+```
+
+In the app, uploading two or more workbooks shows a toggle: **Separate
+schedules** (each workbook sequenced on its own, the default) or **Combined**
+(all rolls joined into one order and sequenced together).
+
+A combined sequence can then be **split into k manufacturing schedules** by
+cutting its k−1 most expensive transitions — the solved path already clusters
+similar layouts, so the big changeovers are the natural boundaries. Each
+schedule restarts from a fresh machine state (cost 0 at its start), so the
+total setup cost drops by exactly the sum of the removed transitions. Cutting
+the largest edges is the optimal way to partition that fixed ordering into k
+open paths; it is not a proven global optimum over all ways of assigning rolls
+to k schedules, since the ordering was solved before the cuts. Alongside the
+"number of schedules (k)" input there is a threshold option (split wherever a
+changeover exceeds X inches) and an elbow/guidance view — for each k, the
+total cost and the marginal saving one more cut would add — so the choice of k
+can be made from the data. Each schedule renders as its own report section
+with its own PDF run sheet; the CLI equivalents are `--split-k` and
+`--split-threshold` on `evaluate.py`.
+
+### How far the exact solver goes
+
+Held–Karp is O(2^n · n²) time and O(2^n · n) memory in the number of
+*distinct layouts* (not rolls). In practice it is comfortable to ~15–18
+distinct layouts, tolerable to ~20, and ~22 is the ceiling — the limit is
+memory for the 2^n DP table, not time. Above the configured threshold the
+multi-start nearest-neighbour + 2-opt/Or-opt heuristic runs instead, and the
+report quotes its quality gap against the minimum-spanning-tree lower bound
+(and, where the instance is small enough, against an exact oracle).
