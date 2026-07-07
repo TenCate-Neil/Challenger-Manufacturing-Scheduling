@@ -237,7 +237,7 @@ run sheet for the manufacturing floor.
 It runs locally — there is nothing to host or deploy:
 
 ```bash
-pip install -r requirements.txt   # now includes streamlit and weasyprint
+pip install -r requirements.txt   # now includes streamlit and fpdf2
 streamlit run app.py
 ```
 
@@ -271,16 +271,16 @@ order, one row per physical roll (`roll_qty` expanded, exactly as the full
 manufacturing order view), and shows the position, Navision lot number, panel
 numbers, length (LF), the same layout colour bar, and the per-step setup change
 cost. A header carries the source file, total setup cost, and roll/layout
-counts. It is built as HTML and rendered to PDF with
-[WeasyPrint](https://weasyprint.org/) so the colour bars carry through; where
-WeasyPrint's native libraries are not installed the app falls back to a note and
-the rest of the report still works.
+counts. It is rendered with [fpdf2](https://py-pdf.github.io/fpdf2/), which is
+pure Python — a plain `pip install`, with no system libraries or browser to set
+up — and the colour bars are drawn from the same colour mapping as the on-screen
+ones. Where fpdf2 is not installed the app falls back to a note and the rest of
+the report still works.
 
 The extraction/optimisation pipeline is factored into `analyse_upload`, and the
-run sheet into `build_run_sheet_html` / `build_run_sheet_pdf`; none import
-Streamlit, so they can be exercised without a browser. Streamlit is imported
-inside `main`, keeping the module importable for tests even when Streamlit is not
-installed.
+run sheet into `_run_sheet_rows` / `build_run_sheet_pdf`; none import Streamlit,
+so they can be exercised without a browser. Streamlit is imported inside `main`,
+keeping the module importable for tests even when Streamlit is not installed.
 
 Tests drive the app headlessly through Streamlit's `AppTest` harness and skip
 cleanly when Streamlit (or the extractor's `openpyxl`) is not installed:

@@ -83,11 +83,15 @@ def test_render_report_path():
     assert len(at.dataframe) == 1
     # Conservation holds for a faithful reordering -> success banner.
     assert any(s.value.startswith("Conservation check passed") for s in at.success)
-    # Both the JSON report and the printable run sheet are downloadable
-    # (WeasyPrint is a declared dependency, so the PDF button is present).
+    # The JSON report is always downloadable; the printable run sheet is too
+    # wherever fpdf2 is installed (it degrades to a note otherwise).
     labels = [b.label for b in at.download_button]
     assert "Download sequence report (JSON)" in labels
-    assert "Download run sheet (PDF)" in labels
+    try:
+        import fpdf  # noqa: F401
+        assert "Download run sheet (PDF)" in labels
+    except ImportError:
+        pass
 
 
 def test_sequence_view_carries_panel_numbers():
@@ -103,43 +107,47 @@ def test_sequence_view_carries_panel_numbers():
     assert panels == {"L1": "P1-P4", "L2": "P5"}
 
 
-def test_build_run_sheet_html_content():
+def test_run_sheet_rows_expand_qty_and_carry_fields():
     if not _HAVE_DEPS:
         return  # skip: dependency-free environment
-    # Two-roll entry (qty=2) must expand to two rows, matching the "Full
-    # manufacturing order" view, and the header/columns must be present.
-    rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, panels="P1-P2"),
+    # A qty=2 entry must expand to two physical-roll rows (matching the "Full
+    # manufacturing order" view), and each row must carry lot, panels, length,
+    # and a parsed layout profile.
+    rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, panels="P1-P2", lf=120),
              _roll("L2", ("FG", 100), ("WHI", 82), sort=2, panels="P3")]
     report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
-    html_doc = app.build_run_sheet_html("SAMPLE.xlsx", report)
+    rows = app._run_sheet_rows(report)
 
-    # Header facts.
-    assert "SAMPLE.xlsx" in html_doc
-    assert "Total setup cost" in html_doc
-    assert "Navision lot #" in html_doc
-    assert "Panel #s" in html_doc
-    # Panel numbers and lots are printed.
-    assert "P1-P2" in html_doc
-    assert "P3" in html_doc
-    # qty=2 expands to two physical rolls -> three rows in total.
-    assert html_doc.count("<tr>") == 1 + 3  # header row + three body rows
-    # Colour bars are rendered (reusing _bar_html): green field segment present.
-    assert "background:#3f8f3a" in html_doc
+    # qty=2 + qty=1 -> three physical rolls, numbered 1..3 (order is optimised,
+    # so assertions below are order-independent).
+    assert [r["position"] for r in rows] == [1, 2, 3]
+    lots = [r["navision_lot"] for r in rows]
+    assert lots.count("L1") == 2 and lots.count("L2") == 1
+    # The L1 rows carry its panels, length, and parsed layout profile.
+    l1_rows = [r for r in rows if r["navision_lot"] == "L1"]
+    assert all(r["panel_numbers"] == "P1-P2" for r in l1_rows)
+    assert all(r["length_lf"] == 120 for r in l1_rows)
+    assert all(("FG", 182) in r["profile"] for r in l1_rows)
+    # The first roll is a fresh start; every change is a human string.
+    assert rows[0]["change"] == "start"
+    assert all(isinstance(r["change"], str) for r in rows)
 
 
 def test_build_run_sheet_pdf_bytes():
     if not _HAVE_DEPS:
         return  # skip: dependency-free environment
     try:
-        import weasyprint  # noqa: F401
+        import fpdf  # noqa: F401
     except Exception:  # noqa: BLE001
-        return  # skip: WeasyPrint (or its native libs) unavailable
-    rolls = [_roll("L1", ("FG", 182), sort=1),
-             _roll("L2", ("FG", 100), ("WHI", 82), sort=2)]
+        return  # skip: fpdf2 unavailable
+    rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, panels="P1-P2"),
+             _roll("L2", ("FG", 100), ("WHI", 82), sort=2, panels="P3")]
     report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
     pdf = app.build_run_sheet_pdf("SAMPLE.xlsx", report)
     assert isinstance(pdf, (bytes, bytearray))
-    assert pdf[:5] == b"%PDF-"
+    assert bytes(pdf[:5]) == b"%PDF-"
+    # A non-trivial document (header + legend + three rows) is well over 1 KB.
+    assert len(pdf) > 1000
 
 
 def test_analyse_upload_rejects_non_workbook():
