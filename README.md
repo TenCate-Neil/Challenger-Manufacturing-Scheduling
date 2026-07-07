@@ -223,3 +223,37 @@ JSON-serialisability):
 python test_evaluate.py            # standalone runner
 pytest test_evaluate.py            # if pytest is installed
 ```
+
+## MVP front end (Phase 5)
+
+`app.py` is a thin [Streamlit](https://streamlit.io) front end over the same
+core functions the CLI uses (`docs/optimisation_plan.md`, Phase 5). It adds no
+logic of its own: it uploads an order workbook, runs the existing extractor and
+the Phase 4 evaluator, and shows the ordered manufacturing sequence, the
+achieved setup cost, the solution quality, the conservation result, and the
+transition breakdown. The JSON report can be downloaded.
+
+It runs locally — there is nothing to host or deploy:
+
+```bash
+pip install -r requirements.txt   # now includes streamlit
+streamlit run app.py
+```
+
+Upload one or more `.xlsx` order workbooks (the `FIELD LAYOUT` sheet). The
+sidebar exposes the same two thresholds as the CLI: the distinct-layout count
+below which the sequence is solved exactly, and the count below which an exact
+oracle is still run to report the true optimality gap.
+
+The extraction/optimisation pipeline is factored into `analyse_upload`, which
+imports no Streamlit, so it can be exercised without a browser; Streamlit is
+imported inside `main`, keeping the module importable for tests even when
+Streamlit is not installed.
+
+Tests drive the app headlessly through Streamlit's `AppTest` harness and skip
+cleanly when Streamlit (or the extractor's `openpyxl`) is not installed:
+
+```bash
+python test_app.py                 # standalone runner
+pytest test_app.py                 # if pytest is installed
+```
