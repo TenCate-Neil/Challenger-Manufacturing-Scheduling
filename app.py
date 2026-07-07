@@ -918,17 +918,37 @@ def main():
 
     with st.sidebar:
         st.header("Settings")
+        st.caption(
+            "Both settings trade certainty for speed. The defaults suit "
+            "almost every order — most of the time there is no need to "
+            "change them.")
         exact_max_layouts = st.number_input(
             "Solve exactly up to N distinct layouts", min_value=1, max_value=22,
             value=DEFAULT_EXACT_MAX_LAYOUTS,
-            help="At or below this many distinct layouts the sequence is solved "
-                 "exactly (Held–Karp, proven optimum); above it a heuristic is "
-                 "used.")
+            help="Orders with this many distinct layouts or fewer get the "
+                 "proven best sequence. Larger orders use a fast method that "
+                 "comes very close but is not guaranteed to be the best.")
         oracle_max_layouts = st.number_input(
             "Report exact gap up to N layouts", min_value=1, max_value=22,
             value=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS,
-            help="For heuristic results, still solve exactly as an oracle to "
-                 "report the true optimality gap up to this many layouts.")
+            help="Only matters when the fast method was used: orders up to "
+                 "this size are also solved exactly in the background, purely "
+                 "to show how close the fast answer came. The sequence itself "
+                 "does not change.")
+        with st.expander("When to change these"):
+            st.markdown(
+                "**Raise the first setting** when a report says "
+                "*near-optimal* instead of *proven optimum* and the order has "
+                "16–20 distinct layouts (common when combining files). Set it "
+                "to cover the order's layout count to get the proven best "
+                "sequence — expect a slower run near 20.\n\n"
+                "**Lower both** (to around 12) if a run feels too slow. The "
+                "fast answer is usually within a few inches of the best, and "
+                "the *gap* figure in the report shows exactly how much was "
+                "given up.\n\n"
+                "Above 22 distinct layouts the exact method runs out of "
+                "memory, so the fast method is always used and these settings "
+                "have no effect.")
 
     uploads = st.file_uploader(
         "Order workbook(s)", type=["xlsx"], accept_multiple_files=True)
