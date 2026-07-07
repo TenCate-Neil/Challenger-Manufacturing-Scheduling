@@ -384,7 +384,7 @@ def main():
     # TenCate branding, pinned to the top-left of the app. `st.logo` (Streamlit
     # >= 1.35) places it in the top-left app chrome; on older versions there is
     # no such API, so the wordmark is rendered at the top-left of the page.
-    logo_path = Path(__file__).resolve().parent / "assets" / "tencate_logo.svg"
+    logo_path = Path(__file__).resolve().parent / "assets" / "tencate_logo.png"
     if logo_path.exists():
         if hasattr(st, "logo"):
             st.logo(str(logo_path))
