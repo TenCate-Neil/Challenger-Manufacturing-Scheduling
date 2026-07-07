@@ -133,6 +133,31 @@ def test_run_sheet_rows_expand_qty_and_carry_fields():
     assert all(isinstance(r["change"], str) for r in rows)
 
 
+def test_distinct_layouts_group_count_and_lots():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    # The bottom breakdown groups by distinct layout, sums the physical rolls
+    # that use each, and lists the lots — so the exact threading widths can be
+    # spelled out per layout.
+    rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, panels="1"),
+             _roll("L2", ("FG", 182), sort=2, panels="2"),
+             _roll("L3", ("FG", 177), ("WHI", 5), sort=3, panels="3")]
+    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+    layouts = app._distinct_layouts(report)
+
+    by_profile = {tuple(l["profile"]): l for l in layouts}
+    # L1 (qty=2) and L2 share the all-FG layout -> three physical rolls, two lots.
+    full_fg = by_profile[(("FG", 182),)]
+    assert full_fg["roll_count"] == 3
+    assert set(full_fg["lots"]) == {"L1", "L2"}
+    # The FG/WHI layout carries its exact segment widths for the breakdown text.
+    fg_whi = by_profile[(("FG", 177), ("WHI", 5))]
+    assert fg_whi["roll_count"] == 1
+    assert fg_whi["lots"] == ["L3"]
+    # There are exactly two distinct layouts in this order.
+    assert len(layouts) == 2
+
+
 def test_build_run_sheet_pdf_bytes():
     if not _HAVE_DEPS:
         return  # skip: dependency-free environment

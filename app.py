@@ -382,7 +382,8 @@ def build_run_sheet_pdf(filename, report):
     Rolls are listed in manufacturing order, one row per physical roll, with the
     position, Navision lot number, panel numbers, length (LF), a colour bar of
     the layout, and the per-step setup change cost. A header carries the source
-    file, total setup cost, and the roll/layout counts."""
+    file, total setup cost, and the roll/layout counts, and a section at the
+    bottom gives the exact threading width of each distinct layout."""
     from fpdf import FPDF
 
     rows = _run_sheet_rows(report)
@@ -476,6 +477,9 @@ def build_run_sheet_pdf(filename, report):
         pdf.cell(w_chg, row_h, _latin1(row["change"]), border=1, align="R")
         pdf.ln(row_h)
 
+    # Exact per-layout threading widths, at the bottom.
+    _draw_layout_breakdowns(pdf, report)
+
     return bytes(pdf.output())
 
 
@@ -514,6 +518,108 @@ def _profile_signature(profile):
     """Rebuild a signature string from a parsed profile so `_ordered_codes`
     (which parses signatures) can be reused on already-parsed rows."""
     return "|".join(f"{width}{code}" for code, width in profile)
+
+
+def _distinct_layouts(report):
+    """The distinct layouts in the order, in first-appearance (manufacturing)
+    order. Each entry carries the parsed profile, how many physical rolls use
+    it (roll_qty summed), and the Navision lots that use it — the data behind
+    the exact per-layout threading breakdown."""
+    order = []
+    seen = {}
+    for entry in report.get("manufacturing_sequence", []):
+        profile = _profile_of(entry.get("layout_signature"))
+        key = _profile_signature(profile)
+        info = seen.get(key)
+        if info is None:
+            info = {"profile": profile, "roll_count": 0, "lots": []}
+            seen[key] = info
+            order.append(key)
+        info["roll_count"] += _reps_of(entry.get("roll_qty"))
+        lot = entry.get("navision_lot")
+        if lot is not None and lot not in info["lots"]:
+            info["lots"].append(lot)
+    return [seen[key] for key in order]
+
+
+def _draw_layout_breakdowns(pdf, report):
+    """Draw the exact threading breakdown of each distinct layout at the bottom
+    of the run sheet: the colour bar plus its segment widths spelled out (e.g.
+    "177 in FG    5 in WHI    = 182 in total"), so the floor has the precise
+    tufting spec and not only the visual bar. One block per distinct layout, in
+    manufacturing order, with the lots that use it."""
+    layouts = _distinct_layouts(report)
+    if not layouts:
+        return
+
+    bar_w = min(pdf.epw, 150.0)
+    bar_h = 6.0
+    max_lots = 20  # keep the lots line bounded on very large orders
+
+    def section_heading():
+        pdf.set_x(pdf.l_margin)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(20, 20, 20)
+        pdf.cell(0, 7, _latin1("Layout threading breakdown"),
+                 new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(90, 90, 90)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 4.5, _latin1(
+            "Exact threading width of each distinct layout, measured front to "
+            "back across the roll width."))
+        pdf.ln(1)
+
+    # Start the section on the current page if it fits, else a fresh page.
+    pdf.ln(5)
+    if pdf.get_y() + 34 > pdf.h - pdf.b_margin:
+        pdf.add_page()
+    section_heading()
+
+    for index, layout in enumerate(layouts, start=1):
+        profile = layout["profile"]
+        total = sum(width for _, width in profile)
+        breakdown = "      ".join(
+            f"{_clean_number(width)} in {code}" for code, width in profile)
+        breakdown = f"{breakdown}      =  {_clean_number(total)} in total"
+        rolls = layout["roll_count"]
+        roll_txt = "1 roll" if rolls == 1 else f"{rolls} rolls"
+        lots = [str(lot) for lot in layout["lots"]]
+        if len(lots) > max_lots:
+            lots_txt = ("Lots: " + ", ".join(lots[:max_lots])
+                        + f"  (+{len(lots) - max_lots} more)")
+        elif lots:
+            lots_txt = "Lots: " + ", ".join(lots)
+        else:
+            lots_txt = ""
+
+        # Keep a whole block together: heading + bar + breakdown + lots.
+        block_h = 6 + bar_h + 6 + (5 if lots_txt else 0) + 3
+        if pdf.get_y() + block_h > pdf.h - pdf.b_margin:
+            pdf.add_page()
+            section_heading()
+
+        pdf.set_x(pdf.l_margin)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_text_color(20, 20, 20)
+        pdf.cell(0, 5.5, _latin1(f"Layout {index}   -   {roll_txt}"),
+                 new_x="LMARGIN", new_y="NEXT")
+
+        y_bar = pdf.get_y()
+        _draw_run_sheet_bar(pdf, pdf.l_margin, y_bar, bar_w, bar_h, profile)
+        pdf.set_y(y_bar + bar_h + 1.2)
+
+        pdf.set_x(pdf.l_margin)
+        pdf.set_font("Helvetica", "", 8.5)
+        pdf.set_text_color(20, 20, 20)
+        pdf.multi_cell(0, 5, _latin1(breakdown))
+
+        if lots_txt:
+            pdf.set_x(pdf.l_margin)
+            pdf.set_font("Helvetica", "", 7.5)
+            pdf.set_text_color(110, 110, 110)
+            pdf.multi_cell(0, 4, _latin1(lots_txt))
+        pdf.ln(2.5)
 
 
 # --------------------------------------------------------------------------
