@@ -164,6 +164,21 @@ def test_join_orders_concatenates_and_tags_copies():
         assert set(original) == {"segments"}
 
 
+def test_join_orders_clears_file_local_layout_group():
+    # The extractor numbers layout groups per file, so the same id in two
+    # workbooks names two different layouts. Joining clears the id on the
+    # copies — grouping uses the threading profile alone — so the Phase 2
+    # extractor-consistency check is not tripped by ids that were never
+    # meant to be compared across files. The originals keep theirs.
+    roll_a = dict(_roll(("FG", 182)), layout_group=3)
+    roll_b = dict(_roll(("WHI", 182)), layout_group=3)
+    combined = rs.join_orders([_extraction("A.xlsx", [roll_a]),
+                               _extraction("B.xlsx", [roll_b])])
+    assert all(r["layout_group"] is None for r in combined["rolls"])
+    assert roll_a["layout_group"] == 3
+    assert roll_b["layout_group"] == 3
+
+
 def test_join_orders_combined_name():
     combined = rs.join_orders([_extraction("A.xlsx", []),
                                _extraction("B.xlsx", [])])
