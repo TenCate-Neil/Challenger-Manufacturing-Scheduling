@@ -229,6 +229,76 @@ def load_rolls(extracted):
     return list(extracted)
 
 
+# MFG-summary fields summed across files when orders are joined. These are the
+# totals Phase 4 cross-checks against the sequence; the remaining summary
+# fields (weight, truck counts) are not read downstream and are left out
+# rather than half-carried.
+_JOINED_SUMMARY_FIELDS = ("mfg_rolls", "mfg_lf", "mfg_sf")
+
+
+def join_orders(extractions):
+    """Join several extraction results into one combined order.
+
+    `extractions` is a list of extraction result dicts (or bare roll lists).
+    The rolls are concatenated in the given order, and each roll is tagged —
+    on a copy; the inputs are not mutated — with the `source_file` it came
+    from, so the combined sequence stays traceable to its workbook.
+
+    No identity reconciliation is needed: Phase 2's `collapse_layouts` groups
+    on the canonical threading profile, so layouts shared between files
+    collapse together and file-local layouts stay separate; and Navision lot
+    numbers are globally unique across files, so roll identity (conservation)
+    carries over unchanged.
+
+    Returns a combined extraction-shaped dict:
+
+      - `source_file`: all input file names joined with " + " (and
+        `source_files`, the same names as a list);
+      - `rolls` / `roll_count`: the concatenated, tagged rolls;
+      - `mfg_summary`: `mfg_rolls` / `mfg_lf` / `mfg_sf` summed across the
+        inputs, so Phase 4's cross-check compares the combined sequence
+        against the combined stated totals. A field is summed only when every
+        input states it numerically; otherwise it is None — a partial sum
+        would raise a spurious mismatch rather than catch a real one;
+      - `warnings`: the inputs' extraction warnings, prefixed with their
+        source file."""
+    names = []
+    rolls = []
+    warnings = []
+    summaries = []
+
+    for index, extracted in enumerate(extractions):
+        if isinstance(extracted, dict):
+            name = str(extracted.get("source_file") or f"order {index + 1}")
+            summaries.append(extracted.get("mfg_summary"))
+            warnings.extend(f"{name}: {w}" for w in extracted.get("warnings", []))
+        else:
+            name = f"order {index + 1}"
+            summaries.append(None)
+        names.append(name)
+        rolls.extend(dict(roll, source_file=name)
+                     for roll in load_rolls(extracted))
+
+    summary = {}
+    for field in _JOINED_SUMMARY_FIELDS:
+        values = [s.get(field) if isinstance(s, dict) else None
+                  for s in summaries]
+        if values and all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                          for v in values):
+            summary[field] = _clean_number(sum(values))
+        else:
+            summary[field] = None
+
+    return {
+        "source_file": " + ".join(names),
+        "source_files": names,
+        "rolls": rolls,
+        "roll_count": len(rolls),
+        "mfg_summary": summary,
+        "warnings": warnings,
+    }
+
+
 def _score_file(path):
     data = json.loads(Path(path).read_text())
     rolls = load_rolls(data)

@@ -41,6 +41,7 @@ from pathlib import Path
 from layout_graph import build_graph, expand_sequence
 from roll_sequencing import (
     _clean_number,
+    join_orders,
     load_rolls,
     profile_width,
     roll_profile,
@@ -49,6 +50,7 @@ from roll_sequencing import (
 )
 from sequencer import (
     DEFAULT_EXACT_MAX_LAYOUTS,
+    choose_cuts,
     path_cost,
     solve_exact,
     solve_heuristic,
@@ -323,14 +325,19 @@ def evaluate(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
 
 
 def _cross_check_mfg_summary(extraction, sequence, warnings):
-    """Compare the sequence's linear/square-foot totals against the
+    """Compare the sequence's roll/linear-foot/square-foot totals against the
     extractor's MFG summary, if present, and warn on any mismatch. This checks
     conservation against a second, independent source rather than only the
-    roll rows."""
+    roll rows.
+
+    In combined mode `extraction` is the `join_orders` result, whose summary
+    fields are already summed across every input file, so the same comparison
+    checks the combined sequence against the combined stated totals."""
     summary = extraction.get("mfg_summary")
     if not isinstance(summary, dict):
         return
     for field, summary_key, label in (
+        ("roll_qty", "mfg_rolls", "physical roll"),
         ("mfg_roll_length_lf", "mfg_lf", "linear feet"),
         ("total_mfg_sf", "mfg_sf", "square feet"),
     ):
@@ -371,6 +378,75 @@ def _sequence_view(sequence):
         })
         prev_profile = profile
     return view
+
+
+# --------------------------------------------------------------------------
+# Splitting an evaluated sequence into k manufacturing schedules
+# --------------------------------------------------------------------------
+def split_report(report, k=None, threshold=None):
+    """Split an evaluated sequence into separate manufacturing schedules by
+    cutting it at its most expensive transitions — into `k` schedules via the
+    k-1 largest, or wherever a changeover strictly exceeds `threshold` inches
+    (exactly one of the two must be given; the cut choice, and why it is
+    optimal for this fixed ordering but not a proven global partition
+    optimum, is `sequencer.choose_cuts`).
+
+    The order of the rolls is untouched — the sequence is only divided — so
+    every conservation property of the underlying report still holds across
+    the schedules together. Each schedule restarts from a fresh machine state
+    (its first entry's change cost becomes 0), so the summed cost drops by
+    exactly the removed transitions.
+
+    Returns a dict:
+
+      - `schedule_count`, `cut_after_positions` (sequence positions after
+        which the cuts fall), `cut_transition_costs`, `total_saving_in`, and
+        `cost_before_in` / `cost_after_in`;
+      - `schedules`: one report-shaped dict per schedule — `schedule_index`,
+        `source_file`, `roll_count`, `distinct_layout_count`,
+        `achieved_cost_in`, and its own `manufacturing_sequence` with
+        positions renumbered from 1 — so each schedule feeds the run-sheet
+        rendering (`app.build_run_sheet_pdf`) unchanged."""
+    entries = report.get("manufacturing_sequence", [])
+    costs = [entry["change_cost_in"] for entry in entries[1:]]
+    cuts = choose_cuts(costs, k=k, threshold=threshold)
+
+    boundaries = [0] + [cut + 1 for cut in cuts] + [len(entries)]
+    source = report.get("source_file")
+    count = len(boundaries) - 1
+
+    schedules = []
+    for index in range(count):
+        part = [dict(entry) for entry
+                in entries[boundaries[index]:boundaries[index + 1]]]
+        for position, entry in enumerate(part, start=1):
+            entry["position"] = position
+        if part:
+            part[0]["change_cost_in"] = 0  # fresh start
+        schedules.append({
+            "schedule_index": index + 1,
+            "source_file": f"{source} - schedule {index + 1} of {count}"
+            if source else f"schedule {index + 1} of {count}",
+            "roll_count": len(part),
+            "distinct_layout_count": len({e.get("layout_signature")
+                                          for e in part}),
+            "achieved_cost_in": _clean_number(
+                sum(e["change_cost_in"] for e in part)),
+            "manufacturing_sequence": part,
+        })
+
+    saving = _clean_number(sum(costs[cut] for cut in cuts))
+    before = report.get("achieved_cost_in")
+    return {
+        "schedule_count": count,
+        "cut_after_positions": [cut + 1 for cut in cuts],
+        "cut_transition_costs": [_clean_number(costs[cut]) for cut in cuts],
+        "total_saving_in": saving,
+        "cost_before_in": before,
+        "cost_after_in": _clean_number(before - saving)
+        if isinstance(before, (int, float)) else None,
+        "schedules": schedules,
+    }
 
 
 def report_json(report, indent=2):
@@ -419,6 +495,17 @@ def _print_summary(path, report):
         print(f"  warning: {w}")
 
 
+def _print_split(split):
+    print(f"  schedules:           {split['schedule_count']} "
+          f"(cost {split['cost_before_in']} in -> {split['cost_after_in']} in, "
+          f"saving {split['total_saving_in']} in)")
+    for schedule in split["schedules"]:
+        print(f"    schedule {schedule['schedule_index']}: "
+              f"{schedule['roll_count']} roll(s), "
+              f"{schedule['distinct_layout_count']} distinct layout(s), "
+              f"setup cost {schedule['achieved_cost_in']} in")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -439,30 +526,62 @@ def main():
                         help="For heuristic results, still solve exactly as an "
                              "oracle to report the true gap at or below this "
                              f"many layouts (default {DEFAULT_EXACT_ORACLE_MAX_LAYOUTS}).")
+    parser.add_argument("--combine", action="store_true",
+                        help="Join all inputs into one combined order and "
+                             "evaluate it as a single sequence, instead of "
+                             "evaluating each file on its own.")
+    parser.add_argument("--split-k", type=int,
+                        help="Split each evaluated sequence into this many "
+                             "schedules by cutting its k-1 most expensive "
+                             "transitions.")
+    parser.add_argument("--split-threshold", type=float,
+                        help="Split each evaluated sequence wherever a "
+                             "changeover strictly exceeds this many inches.")
     args = parser.parse_args()
+
+    if args.split_k is not None and args.split_threshold is not None:
+        parser.error("give at most one of --split-k / --split-threshold")
 
     out_dir = None
     if args.out_dir:
         out_dir = Path(args.out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
+    if args.combine:
+        extractions = [json.loads(Path(path).read_text())
+                       for path in args.files]
+        combined = join_orders(extractions)
+        jobs = [(f"combined: {combined['source_file']}",
+                 combined["rolls"], combined, "combined")]
+    else:
+        jobs = []
+        for path in args.files:
+            data = json.loads(Path(path).read_text())
+            jobs.append((path, load_rolls(data),
+                         data if isinstance(data, dict) else None,
+                         Path(path).stem))
+
     exit_code = 0
-    for path in args.files:
-        data = json.loads(Path(path).read_text())
-        rolls = load_rolls(data)
+    for label, rolls, extraction, stem in jobs:
         report = evaluate(
             rolls,
             exact_max_layouts=args.exact_max_layouts,
             oracle_max_layouts=args.oracle_max_layouts,
-            extraction=data if isinstance(data, dict) else None,
+            extraction=extraction,
         )
-        _print_summary(path, report)
+        _print_summary(label, report)
+
+        if args.split_k is not None or args.split_threshold is not None:
+            split = split_report(report, k=args.split_k,
+                                 threshold=args.split_threshold)
+            report["schedule_split"] = split
+            _print_split(split)
 
         if not report["conservation"]["passed"]:
             exit_code = 1
 
         if out_dir is not None:
-            out_path = out_dir / (Path(path).stem + ".sequence.json")
+            out_path = out_dir / (stem + ".sequence.json")
             out_path.write_text(report_json(report))
             print(f"  wrote {out_path}")
 
