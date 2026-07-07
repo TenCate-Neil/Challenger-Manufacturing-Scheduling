@@ -346,9 +346,9 @@ def _cross_check_mfg_summary(extraction, sequence, warnings):
 
 def _sequence_view(sequence):
     """A compact, JSON-friendly view of the optimised sequence: one entry per
-    roll in manufacturing order, with its identity, quantity, size, layout,
-    and the setup change cost incurred to switch to it from the previous
-    roll (0 for the first roll — a fresh start, plan assumption 7)."""
+    roll in manufacturing order, with its identity, panel numbers, quantity,
+    size, layout, and the setup change cost incurred to switch to it from the
+    previous roll (0 for the first roll — a fresh start, plan assumption 7)."""
     from roll_sequencing import profile_cost
 
     view = []
@@ -359,6 +359,7 @@ def _sequence_view(sequence):
         view.append({
             "position": position,
             "navision_lot": roll.get("navision_lot"),
+            "panel_numbers": roll.get("panel_numbers"),
             "sort": roll.get("sort"),
             "roll_type": roll.get("roll_type"),
             "roll_qty": roll.get("roll_qty"),

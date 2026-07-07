@@ -27,9 +27,10 @@ def _skip_reason():
     return f"streamlit/extractor not available ({_IMPORT_ERROR})"
 
 
-def _roll(lot, *segs, sort=None, qty=1, lf=100, sf=1500):
+def _roll(lot, *segs, sort=None, qty=1, lf=100, sf=1500, panels=None):
     return {"navision_lot": lot, "sort": sort, "roll_type": "FIELD",
             "roll_qty": qty, "mfg_roll_length_lf": lf, "total_mfg_sf": sf,
+            "panel_numbers": panels,
             "layout_signature": "|".join(f"{w}{c}" for c, w in segs),
             "layout_group": None,
             "segments": [{"color_code": c, "width_in": w} for c, w in segs]}
@@ -82,8 +83,63 @@ def test_render_report_path():
     assert len(at.dataframe) == 1
     # Conservation holds for a faithful reordering -> success banner.
     assert any(s.value.startswith("Conservation check passed") for s in at.success)
-    # The JSON report is downloadable.
-    assert len(at.download_button) == 1
+    # Both the JSON report and the printable run sheet are downloadable
+    # (WeasyPrint is a declared dependency, so the PDF button is present).
+    labels = [b.label for b in at.download_button]
+    assert "Download sequence report (JSON)" in labels
+    assert "Download run sheet (PDF)" in labels
+
+
+def test_sequence_view_carries_panel_numbers():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    # Panel numbers must be threaded from the roll dict into the sequence view
+    # so the run sheet can print them.
+    rolls = [_roll("L1", ("FG", 182), sort=1, panels="P1-P4"),
+             _roll("L2", ("FG", 100), ("WHI", 82), sort=2, panels="P5")]
+    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+    panels = {e["navision_lot"]: e.get("panel_numbers")
+              for e in report["manufacturing_sequence"]}
+    assert panels == {"L1": "P1-P4", "L2": "P5"}
+
+
+def test_build_run_sheet_html_content():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    # Two-roll entry (qty=2) must expand to two rows, matching the "Full
+    # manufacturing order" view, and the header/columns must be present.
+    rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, panels="P1-P2"),
+             _roll("L2", ("FG", 100), ("WHI", 82), sort=2, panels="P3")]
+    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+    html_doc = app.build_run_sheet_html("SAMPLE.xlsx", report)
+
+    # Header facts.
+    assert "SAMPLE.xlsx" in html_doc
+    assert "Total setup cost" in html_doc
+    assert "Navision lot #" in html_doc
+    assert "Panel #s" in html_doc
+    # Panel numbers and lots are printed.
+    assert "P1-P2" in html_doc
+    assert "P3" in html_doc
+    # qty=2 expands to two physical rolls -> three rows in total.
+    assert html_doc.count("<tr>") == 1 + 3  # header row + three body rows
+    # Colour bars are rendered (reusing _bar_html): green field segment present.
+    assert "background:#3f8f3a" in html_doc
+
+
+def test_build_run_sheet_pdf_bytes():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    try:
+        import weasyprint  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return  # skip: WeasyPrint (or its native libs) unavailable
+    rolls = [_roll("L1", ("FG", 182), sort=1),
+             _roll("L2", ("FG", 100), ("WHI", 82), sort=2)]
+    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+    pdf = app.build_run_sheet_pdf("SAMPLE.xlsx", report)
+    assert isinstance(pdf, (bytes, bytearray))
+    assert pdf[:5] == b"%PDF-"
 
 
 def test_analyse_upload_rejects_non_workbook():

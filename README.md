@@ -231,12 +231,13 @@ core functions the CLI uses (`docs/optimisation_plan.md`, Phase 5). It adds no
 logic of its own: it uploads an order workbook, runs the existing extractor and
 the Phase 4 evaluator, and shows the ordered manufacturing sequence, the
 achieved setup cost, the solution quality, the conservation result, and the
-transition breakdown. The JSON report can be downloaded.
+transition breakdown. The JSON report can be downloaded, as can a printable PDF
+run sheet for the manufacturing floor.
 
 It runs locally — there is nothing to host or deploy:
 
 ```bash
-pip install -r requirements.txt   # now includes streamlit
+pip install -r requirements.txt   # now includes streamlit and weasyprint
 streamlit run app.py
 ```
 
@@ -264,10 +265,22 @@ is visible:
 These are display-only: they read the layout signatures already in the Phase 4
 report and add no sequencing logic.
 
-The extraction/optimisation pipeline is factored into `analyse_upload`, which
-imports no Streamlit, so it can be exercised without a browser; Streamlit is
-imported inside `main`, keeping the module importable for tests even when
-Streamlit is not installed.
+Alongside the JSON download there is a **Download run sheet (PDF)** button — a
+printable sheet for the manufacturing floor. It lists the rolls in manufacturing
+order, one row per physical roll (`roll_qty` expanded, exactly as the full
+manufacturing order view), and shows the position, Navision lot number, panel
+numbers, length (LF), the same layout colour bar, and the per-step setup change
+cost. A header carries the source file, total setup cost, and roll/layout
+counts. It is built as HTML and rendered to PDF with
+[WeasyPrint](https://weasyprint.org/) so the colour bars carry through; where
+WeasyPrint's native libraries are not installed the app falls back to a note and
+the rest of the report still works.
+
+The extraction/optimisation pipeline is factored into `analyse_upload`, and the
+run sheet into `build_run_sheet_html` / `build_run_sheet_pdf`; none import
+Streamlit, so they can be exercised without a browser. Streamlit is imported
+inside `main`, keeping the module importable for tests even when Streamlit is not
+installed.
 
 Tests drive the app headlessly through Streamlit's `AppTest` harness and skip
 cleanly when Streamlit (or the extractor's `openpyxl`) is not installed:
