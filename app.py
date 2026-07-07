@@ -9,15 +9,15 @@ Phase 4 evaluator (`evaluate`), and shows the ordered manufacturing sequence,
 the achieved setup cost, the solution quality, the conservation result, and the
 transition breakdown. The JSON report can be downloaded, as can a printable PDF
 "run sheet" for the manufacturing floor (one row per physical roll, with the
-layout colour bars rendered via WeasyPrint).
+layout colour bars drawn with fpdf2 — pure Python, no system libraries needed).
 
 There is no logic duplicated here and nothing to deploy — it runs locally:
 
     streamlit run app.py
 
 The extraction/optimisation pipeline is factored into `analyse_upload`, and the
-run sheet into `build_run_sheet_html` / `build_run_sheet_pdf`; none of these
-import Streamlit, so they can be exercised without a browser. Streamlit itself is
+run sheet into `_run_sheet_rows` / `build_run_sheet_pdf`; none of these import
+Streamlit, so they can be exercised without a browser. Streamlit itself is
 imported inside `main`, keeping this module importable for tests even when
 Streamlit is not installed.
 """
@@ -280,60 +280,39 @@ def _render_combined_order(st, sequence):
 
 
 # --------------------------------------------------------------------------
-# Printable run sheet (HTML -> PDF) — testable without Streamlit
+# Printable run sheet (PDF) — testable without Streamlit
 # --------------------------------------------------------------------------
 # The manufacturing floor wants a paper run sheet, not JSON. It lists the rolls
 # in manufacturing order — one row per physical roll (roll_qty expanded, exactly
-# as the "Full manufacturing order" view does) — with the same colour-bar visual
-# of each layout so an operator can eyeball the threading. It is built as HTML
-# and rendered to PDF with WeasyPrint, which keeps the colour bars intact. The
-# HTML builder takes no Streamlit and depends on no PDF library, so it can be
-# asserted on directly in tests; only `build_run_sheet_pdf` needs WeasyPrint.
-def _run_sheet_row_html(position, lot, panels, length, bar, change):
-    """One table row of the run sheet: position, Navision lot, panel numbers,
-    length in linear feet, the layout colour bar, and the setup change cost
-    incurred to switch to this roll."""
-    lot_txt = html.escape(str(lot)) if lot is not None else ""
-    panels_txt = html.escape(str(panels)) if panels not in (None, "") else ""
-    length_txt = (html.escape(f"{_clean_number(length)}")
-                  if isinstance(length, (int, float)) and not isinstance(length, bool)
-                  else "")
-    return (
-        "<tr>"
-        f'<td class="pos">{position}</td>'
-        f'<td class="lot">{lot_txt}</td>'
-        f'<td class="panels">{panels_txt}</td>'
-        f'<td class="len">{length_txt}</td>'
-        f'<td class="bar">{bar}</td>'
-        f'<td class="chg">{html.escape(change)}</td>'
-        "</tr>")
+# as the "Full manufacturing order" view does) — with a colour-bar visual of
+# each layout so an operator can eyeball the threading. The bars are drawn from
+# the same colour mapping (`_color_for_code`) as the on-screen `_bar_html`, only
+# to the PDF page instead of to HTML.
+#
+# It is rendered with fpdf2, which is pure Python: a plain `pip install`, no
+# system libraries or browser to install. `_run_sheet_rows` builds the row data
+# with no Streamlit and no PDF library, so the content is testable on its own,
+# and `build_run_sheet_pdf` returns bytes that can be asserted on directly.
+def _hex_to_rgb(hex_color):
+    """A #rrggbb colour as an (r, g, b) tuple of 0-255 ints, for fpdf."""
+    h = hex_color.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
-def build_run_sheet_html(filename, report):
-    """Build the printable run sheet as a standalone HTML document.
+def _run_sheet_rows(report):
+    """The run sheet's body rows as plain data, in manufacturing order and one
+    row per physical roll: each sequence entry's `roll_qty` is expanded so a
+    two-roll entry becomes two rows, matching the "Full manufacturing order"
+    view. Each row carries the position, Navision lot number, panel numbers,
+    length (LF), the parsed layout profile, and the setup change cost incurred
+    to switch to it (a human string; "start" for the first roll).
 
-    Rolls are listed in manufacturing order, one row per physical roll: the
-    `roll_qty` of each sequence entry is expanded so a two-roll entry becomes
-    two rows, matching the "Full manufacturing order" view. Each row shows the
-    position, Navision lot number, panel numbers, length (LF), a colour-bar
-    visual of the layout (the same `_bar_html` mapping used on screen), and the
-    per-step setup change cost in inches. A header carries the source file, the
-    total achieved setup cost, and the roll/layout counts.
-
-    Takes no Streamlit and no PDF library, so it is testable on its own."""
-    sequence = report.get("manufacturing_sequence", [])
-    source = report.get("source_file") or filename
-    total_cost = report.get("achieved_cost_in")
-    roll_count = report.get("roll_count")
-    layout_count = report.get("distinct_layout_count")
-
-    codes = _ordered_codes(entry.get("layout_signature") for entry in sequence)
-    legend = _legend_html(codes) if codes else ""
-
+    No Streamlit and no PDF library — the shared, testable core of the run
+    sheet."""
     rows = []
     position = 0
     prev_profile = None
-    for entry in sequence:
+    for entry in report.get("manufacturing_sequence", []):
         profile = _profile_of(entry.get("layout_signature"))
         lot = entry.get("navision_lot")
         panels = entry.get("panel_numbers")
@@ -345,86 +324,196 @@ def build_run_sheet_html(filename, report):
             else:
                 delta = _clean_number(profile_cost(prev_profile, profile))
                 change = f"+{delta} in" if delta else "0 in"
-            rows.append(_run_sheet_row_html(
-                position, lot, panels, length, _bar_html(profile), change))
+            rows.append({
+                "position": position,
+                "navision_lot": lot,
+                "panel_numbers": panels,
+                "length_lf": length,
+                "profile": profile,
+                "change": change,
+            })
             prev_profile = profile
+    return rows
 
-    meta_items = [("Source file", html.escape(str(source)))]
-    if total_cost is not None:
-        meta_items.append(("Total setup cost", f"{html.escape(str(total_cost))} in"))
-    if roll_count is not None:
-        meta_items.append(("Rolls", html.escape(str(roll_count))))
-    if layout_count is not None:
-        meta_items.append(("Distinct layouts", html.escape(str(layout_count))))
-    meta_html = "".join(
-        f'<div class="meta-item"><span class="meta-label">{label}</span>'
-        f'<span class="meta-value">{value}</span></div>'
-        for label, value in meta_items)
 
-    return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>Run sheet — {html.escape(str(source))}</title>
-<style>
-  @page {{ size: A4 landscape; margin: 14mm; }}
-  body {{ font-family: "Helvetica Neue", Arial, sans-serif; color: #1b1b1b;
-          font-size: 11px; }}
-  h1 {{ font-size: 18px; margin: 0 0 8px; }}
-  .meta {{ display: flex; flex-wrap: wrap; gap: 6px 28px; margin: 0 0 10px; }}
-  .meta-item {{ display: flex; flex-direction: column; }}
-  .meta-label {{ font-size: 9px; text-transform: uppercase; letter-spacing: .04em;
-                 color: #666; }}
-  .meta-value {{ font-size: 13px; font-weight: 600; }}
-  .legend {{ margin: 0 0 10px; }}
-  table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
-  th, td {{ border: 1px solid #d0d0d0; padding: 4px 6px; vertical-align: middle;
-            text-align: left; box-sizing: border-box; }}
-  thead th {{ background: #f2f2f2; font-size: 9px; text-transform: uppercase;
-              letter-spacing: .04em; }}
-  tbody tr:nth-child(even) td {{ background: #fafafa; }}
-  th.pos, td.pos {{ width: 5%; text-align: right;
-                    font-variant-numeric: tabular-nums; }}
-  th.lot, td.lot {{ width: 15%; font-family: ui-monospace, Menlo, monospace; }}
-  th.panels, td.panels {{ width: 14%; }}
-  th.len, td.len {{ width: 9%; text-align: right;
-                    font-variant-numeric: tabular-nums; }}
-  th.bar, td.bar {{ width: 45%; }}
-  th.chg, td.chg {{ width: 12%; text-align: right;
-                    font-variant-numeric: tabular-nums; }}
-</style>
-</head>
-<body>
-  <h1>Manufacturing run sheet</h1>
-  <div class="meta">{meta_html}</div>
-  {('<div class="legend">' + legend + "</div>") if legend else ""}
-  <table>
-    <thead>
-      <tr>
-        <th class="pos">#</th>
-        <th class="lot">Navision lot #</th>
-        <th class="panels">Panel #s</th>
-        <th class="len">Length (LF)</th>
-        <th class="bar">Layout</th>
-        <th class="chg">Setup change</th>
-      </tr>
-    </thead>
-    <tbody>
-      {"".join(rows)}
-    </tbody>
-  </table>
-</body>
-</html>"""
+def _latin1(value):
+    """Text safe for fpdf's built-in (latin-1) core fonts: unencodable
+    characters are replaced rather than raising."""
+    return str(value).encode("latin-1", "replace").decode("latin-1")
+
+
+def _draw_run_sheet_bar(pdf, x, y, width, height, profile):
+    """Draw a roll's threading profile as a horizontal segmented colour bar at
+    (x, y), `width` x `height` mm — the PDF twin of `_bar_html`. Segment widths
+    are proportional to inches; codes use the same colours as on screen, with a
+    short label centred on any segment wide enough to hold it."""
+    total = sum(seg_w for _, seg_w in profile)
+    if total <= 0:
+        pdf.set_draw_color(170, 170, 170)
+        pdf.rect(x, y, width, height, style="D")
+        return
+
+    cursor = x
+    last = len(profile) - 1
+    for i, (code, seg_w) in enumerate(profile):
+        # Close the bar exactly on the last segment so rounding leaves no sliver.
+        seg = (x + width - cursor) if i == last else width * seg_w / total
+        r, g, b = _hex_to_rgb(_color_for_code(code))
+        pdf.set_fill_color(r, g, b)
+        pdf.set_draw_color(140, 140, 140)  # thin separators between segments
+        pdf.rect(cursor, y, seg, height, style="DF")
+
+        label = _latin1(code)
+        pdf.set_font("Helvetica", "B", 6.5)
+        if seg >= pdf.get_string_width(label) + 1.5:
+            tr, tg, tb = _hex_to_rgb(_text_on(_color_for_code(code)))
+            pdf.set_text_color(tr, tg, tb)
+            pdf.text(cursor + seg / 2 - pdf.get_string_width(label) / 2,
+                     y + height / 2 + 1.1, label)
+        cursor += seg
 
 
 def build_run_sheet_pdf(filename, report):
-    """Render the run sheet to PDF bytes. WeasyPrint is imported lazily so this
-    module (and the rest of the app) stays importable where WeasyPrint's native
-    libraries are not installed; the caller degrades gracefully in that case."""
-    from weasyprint import HTML
+    """Render the run sheet to PDF bytes with fpdf2 (pure Python; no system
+    libraries or browser required). Imported lazily so the module stays
+    importable — and the rest of the app keeps working — where fpdf2 is not
+    installed; the caller degrades gracefully in that case.
 
-    document = build_run_sheet_html(filename, report)
-    return HTML(string=document).write_pdf()
+    Rolls are listed in manufacturing order, one row per physical roll, with the
+    position, Navision lot number, panel numbers, length (LF), a colour bar of
+    the layout, and the per-step setup change cost. A header carries the source
+    file, total setup cost, and the roll/layout counts."""
+    from fpdf import FPDF
+
+    rows = _run_sheet_rows(report)
+    source = str(report.get("source_file") or filename)
+    total_cost = report.get("achieved_cost_in")
+    roll_count = report.get("roll_count")
+    layout_count = report.get("distinct_layout_count")
+
+    pdf = FPDF(orientation="L", unit="mm", format="A4")
+    pdf.set_margins(14, 12, 14)
+    pdf.set_auto_page_break(False)
+    pdf.add_page()
+
+    # Column widths (mm), summing to the effective page width.
+    epw = pdf.epw
+    w_pos, w_lot, w_panels, w_len, w_chg = 12, 40, 34, 24, 28
+    w_bar = epw - (w_pos + w_lot + w_panels + w_len + w_chg)
+    columns = [("#", w_pos, "R"), ("Navision lot #", w_lot, "L"),
+               ("Panel #s", w_panels, "L"), ("Length (LF)", w_len, "R"),
+               ("Layout", w_bar, "L"), ("Setup change", w_chg, "R")]
+    row_h, bar_h = 8.5, 5.0
+
+    def draw_header():
+        pdf.set_xy(pdf.l_margin, pdf.t_margin)
+        pdf.set_text_color(20, 20, 20)
+        pdf.set_font("Helvetica", "B", 15)
+        pdf.cell(0, 8, _latin1("Manufacturing run sheet"),
+                 new_x="LMARGIN", new_y="NEXT")
+
+        parts = [f"Source file: {source}"]
+        if total_cost is not None:
+            parts.append(f"Total setup cost: {total_cost} in")
+        if roll_count is not None:
+            parts.append(f"Rolls: {roll_count}")
+        if layout_count is not None:
+            parts.append(f"Distinct layouts: {layout_count}")
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(90, 90, 90)
+        pdf.cell(0, 6, _latin1("      ".join(parts)),
+                 new_x="LMARGIN", new_y="NEXT")
+
+        _draw_legend(pdf, rows)
+
+    def draw_table_header():
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_fill_color(240, 240, 240)
+        pdf.set_draw_color(180, 180, 180)
+        pdf.set_text_color(40, 40, 40)
+        pdf.set_x(pdf.l_margin)
+        for title, width, align in columns:
+            pdf.cell(width, 7, _latin1(title), border=1, align=align, fill=True)
+        pdf.ln(7)
+
+    draw_header()
+    draw_table_header()
+
+    for row in rows:
+        if pdf.get_y() + row_h > pdf.h - pdf.b_margin:
+            pdf.add_page()
+            draw_table_header()
+
+        y0 = pdf.get_y()
+        pdf.set_x(pdf.l_margin)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(20, 20, 20)
+        pdf.set_draw_color(200, 200, 200)
+
+        length = row["length_lf"]
+        length_txt = (f"{_clean_number(length)}"
+                      if isinstance(length, (int, float))
+                      and not isinstance(length, bool) else "")
+        pdf.cell(w_pos, row_h, _latin1(row["position"]), border=1, align="R")
+        pdf.cell(w_lot, row_h, _latin1(row["navision_lot"] or ""),
+                 border=1, align="L")
+        panels = row["panel_numbers"]
+        pdf.cell(w_panels, row_h,
+                 _latin1(panels) if panels not in (None, "") else "",
+                 border=1, align="L")
+        pdf.cell(w_len, row_h, _latin1(length_txt), border=1, align="R")
+
+        # The layout cell: a bordered box with the colour bar drawn inside it.
+        bar_x = pdf.get_x()
+        pdf.cell(w_bar, row_h, "", border=1)
+        _draw_run_sheet_bar(pdf, bar_x + 1.5, y0 + (row_h - bar_h) / 2,
+                            w_bar - 3, bar_h, row["profile"])
+
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(20, 20, 20)
+        pdf.set_draw_color(200, 200, 200)
+        pdf.set_xy(bar_x + w_bar, y0)
+        pdf.cell(w_chg, row_h, _latin1(row["change"]), border=1, align="R")
+        pdf.ln(row_h)
+
+    return bytes(pdf.output())
+
+
+def _draw_legend(pdf, rows):
+    """A compact colour legend under the header: a swatch and code for each
+    colour used, in first-appearance order, wrapping within the page width."""
+    codes = _ordered_codes(
+        _profile_signature(row["profile"]) for row in rows)
+    if not codes:
+        pdf.ln(2)
+        return
+
+    pdf.ln(1)
+    pdf.set_font("Helvetica", "", 8)
+    swatch = 3.2
+    x = pdf.l_margin
+    y = pdf.get_y()
+    for code in codes:
+        label = _latin1(code)
+        label_w = pdf.get_string_width(label) + 4
+        if x + swatch + 1 + label_w > pdf.w - pdf.r_margin:
+            x = pdf.l_margin
+            y += 5.5
+        r, g, b = _hex_to_rgb(_color_for_code(code))
+        pdf.set_fill_color(r, g, b)
+        pdf.set_draw_color(150, 150, 150)
+        pdf.rect(x, y, swatch, swatch, style="DF")
+        pdf.set_text_color(40, 40, 40)
+        pdf.set_xy(x + swatch + 1, y - 0.7)
+        pdf.cell(label_w, swatch + 1.2, label)
+        x += swatch + 1 + label_w
+    pdf.set_y(y + 6)
+
+
+def _profile_signature(profile):
+    """Rebuild a signature string from a parsed profile so `_ordered_codes`
+    (which parses signatures) can be reused on already-parsed rows."""
+    return "|".join(f"{width}{code}" for code, width in profile)
 
 
 # --------------------------------------------------------------------------
@@ -528,15 +617,14 @@ def _render_report(st, filename, extraction, report):
         mime="application/json",
     )
 
-    # The printable run sheet needs WeasyPrint; where it (or its native
-    # libraries) is unavailable, fall back to a note rather than erroring so
-    # the rest of the report still works.
+    # The printable run sheet needs fpdf2; where it is unavailable, fall back to
+    # a note rather than erroring so the rest of the report still works.
     try:
         pdf_bytes = build_run_sheet_pdf(filename, report)
     except Exception as exc:  # noqa: BLE001
         downloads[1].caption(
-            "Run sheet PDF needs WeasyPrint — install `weasyprint` to enable "
-            f"it ({exc}).")
+            "Run sheet PDF needs fpdf2 — run `pip install fpdf2` to enable it "
+            f"({exc}).")
     else:
         downloads[1].download_button(
             "Download run sheet (PDF)",
