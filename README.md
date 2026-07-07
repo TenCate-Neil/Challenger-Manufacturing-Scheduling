@@ -104,3 +104,39 @@ Run the tests (no extra dependencies required):
 python test_roll_sequencing.py     # standalone runner
 pytest test_roll_sequencing.py     # if pytest is installed
 ```
+
+## Collapse duplicates and distance graph (Phase 2)
+
+`layout_graph.py` prepares the sequencing problem described in
+`docs/optimisation_plan.md` section 4, steps 1 and 2. It does not choose an
+order (that is Phase 3); it collapses the order into distinct layouts and
+computes the distances between them.
+
+- **Collapse duplicates** (`collapse_layouts`): rolls that share an identical
+  threading profile can be produced in any internal order at zero cost, so
+  they are grouped into distinct layouts. This shrinks the problem from
+  "number of rolls" to "number of distinct layouts". Grouping is on the
+  canonical threading profile — the exact condition under which the Phase 1
+  cost between two rolls is 0 — and the extractor's `layout_group` /
+  `layout_signature` are carried through, with any disagreement reported as a
+  warning.
+- **Distance graph** (`distance_matrix`): the pairwise setup change cost
+  between every pair of distinct layouts, using the Phase 1 cost. The matrix
+  is symmetric with a zero diagonal.
+- **Expansion** (`expand_sequence`): the inverse of collapsing. Given an order
+  of distinct layouts it expands each back into its member rolls, recovering a
+  full roll sequence. Because grouping keeps every roll, expansion always
+  reproduces exactly the rolls that went in (conservation).
+
+Inspect the collapsed layouts and distance graph for an order:
+
+```bash
+python layout_graph.py EXTRACTED.json [EXTRACTED2.json ...]
+```
+
+Tests:
+
+```bash
+python test_layout_graph.py        # standalone runner
+pytest test_layout_graph.py        # if pytest is installed
+```
