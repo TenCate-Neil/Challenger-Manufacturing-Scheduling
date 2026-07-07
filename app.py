@@ -19,6 +19,8 @@ itself is imported inside `main`, keeping this module importable for tests even
 when Streamlit is not installed.
 """
 
+import hashlib
+import html
 import os
 import tempfile
 from pathlib import Path
@@ -30,6 +32,7 @@ from evaluate import (
     report_json,
 )
 from extract_turf_layout import TemplateMismatch, extract_workbook
+from roll_sequencing import _clean_number, parse_signature, profile_cost
 
 
 # --------------------------------------------------------------------------
@@ -74,6 +77,206 @@ def analyse_upload(filename, file_bytes,
 
 
 # --------------------------------------------------------------------------
+# Colour-bar visuals (Steps 1-3)
+# --------------------------------------------------------------------------
+# Yarn colour codes are drawn as literal colours so the bars read like the
+# physical roll: field green stays green, white stays white. Known codes map to
+# a sensible real colour; anything unrecognised gets a stable, distinct fallback
+# colour so the same code is always the same colour across every bar and legend.
+_KNOWN_COLORS = {
+    "FG": "#3f8f3a", "GRN": "#2e7d32", "GRE": "#2e7d32", "GREEN": "#2e7d32",
+    "DKG": "#1b5e20", "LTG": "#7cb342",
+    "LIM": "#9ccc65", "LIME": "#9ccc65",
+    "WHI": "#f4f4f4", "WHT": "#f4f4f4", "WHITE": "#f4f4f4",
+    "BLK": "#2b2b2b", "BLACK": "#2b2b2b",
+    "RED": "#d64541", "MAR": "#7b2b30", "MAROON": "#7b2b30",
+    "BLU": "#2f6fb0", "BLUE": "#2f6fb0", "RYL": "#2f6fb0",
+    "NVY": "#1f2a52", "NAV": "#1f2a52", "NAVY": "#1f2a52",
+    "YEL": "#f2c33d", "YLW": "#f2c33d", "GLD": "#c9a227", "GOLD": "#c9a227",
+    "ORG": "#e5852b", "ORA": "#e5852b", "ORANGE": "#e5852b",
+    "PUR": "#7b4ea3", "PURPLE": "#7b4ea3",
+    "BRN": "#6d4c41", "TAN": "#cbb994",
+    "GRY": "#9aa0a6", "GRA": "#9aa0a6", "GRAY": "#9aa0a6", "SIL": "#c2c7cc",
+    "TEA": "#1f8f86", "TEAL": "#1f8f86",
+    "PNK": "#e57ba0", "PINK": "#e57ba0",
+}
+
+# Stable fallback colours for codes not in the map above.
+_FALLBACK_PALETTE = [
+    "#4e79a7", "#f28e2b", "#59a14f", "#e15759", "#b07aa1",
+    "#76b7b2", "#edc948", "#ff9da7", "#9c755f", "#8cd17d",
+]
+
+
+def _color_for_code(code):
+    """A stable display colour for a yarn colour/type code."""
+    key = str(code).strip().upper()
+    if key in _KNOWN_COLORS:
+        return _KNOWN_COLORS[key]
+    digest = int(hashlib.md5(key.encode("utf-8")).hexdigest(), 16)
+    return _FALLBACK_PALETTE[digest % len(_FALLBACK_PALETTE)]
+
+
+def _text_on(hex_color):
+    """Black or white label text, whichever reads better on `hex_color`."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return "#1b1b1b" if luminance > 140 else "#ffffff"
+
+
+def _profile_of(signature):
+    """Parse a layout signature string into an ordered (code, width) profile,
+    tolerating a missing/empty signature."""
+    if not signature:
+        return []
+    try:
+        return parse_signature(signature)
+    except ValueError:
+        return []
+
+
+def _bar_html(profile, height=24, labels=True, min_label_pct=7.0):
+    """A roll's threading profile as a horizontal segmented colour bar. Segment
+    widths are proportional to inches; a 1px gap between segments (the grey
+    container showing through) keeps every boundary visible even between two
+    similar colours."""
+    total = sum(w for _, w in profile)
+    if total <= 0:
+        return (f'<div style="height:{height}px;border:1px dashed '
+                'rgba(128,128,128,0.6);border-radius:4px;"></div>')
+    segments = []
+    for code, width in profile:
+        pct = 100.0 * width / total
+        bg = _color_for_code(code)
+        fg = _text_on(bg)
+        label = html.escape(str(code)) if labels and pct >= min_label_pct else ""
+        title = html.escape(f"{code}: {_clean_number(width)} in")
+        segments.append(
+            f'<div title="{title}" style="width:{pct:.4f}%;background:{bg};'
+            f'color:{fg};display:flex;align-items:center;justify-content:center;'
+            'font-size:11px;font-weight:600;line-height:1;overflow:hidden;'
+            f'white-space:nowrap;">{label}</div>')
+    return (
+        f'<div style="display:flex;height:{height}px;width:100%;gap:1px;'
+        'background:rgba(128,128,128,0.55);border:1px solid rgba(128,128,128,0.7);'
+        f'border-radius:4px;overflow:hidden;">{"".join(segments)}</div>')
+
+
+def _row_html(left, bar, right, right_strong=False):
+    """One labelled bar row: a left caption, the bar, and a right caption."""
+    weight = "700" if right_strong else "400"
+    return (
+        '<div style="display:flex;align-items:center;gap:12px;margin:6px 0;">'
+        '<div style="flex:0 0 96px;font-size:12px;font-family:'
+        'ui-monospace,SFMono-Regular,Menlo,monospace;opacity:0.85;'
+        f'text-align:right;overflow:hidden;white-space:nowrap;">{left}</div>'
+        f'<div style="flex:1 1 auto;min-width:0;">{bar}</div>'
+        f'<div style="flex:0 0 84px;font-size:12px;font-weight:{weight};'
+        f'text-align:right;">{right}</div>'
+        '</div>')
+
+
+def _ordered_codes(signatures):
+    """Unique colour codes across the given signatures, in first-appearance
+    order, for a compact legend."""
+    seen = []
+    for signature in signatures:
+        for code, _ in _profile_of(signature):
+            if code not in seen:
+                seen.append(code)
+    return seen
+
+
+def _legend_html(codes):
+    items = []
+    for code in codes:
+        bg = _color_for_code(code)
+        items.append(
+            '<span style="display:inline-flex;align-items:center;gap:6px;'
+            'margin:2px 14px 2px 0;font-size:12px;">'
+            f'<span style="width:14px;height:14px;border-radius:3px;background:'
+            f'{bg};border:1px solid rgba(128,128,128,0.6);"></span>'
+            f'{html.escape(str(code))}</span>')
+    return ('<div style="display:flex;flex-wrap:wrap;margin:2px 0 10px;">'
+            + "".join(items) + "</div>")
+
+
+def _reps_of(qty):
+    """How many physical rolls a sequence entry stands for (its roll_qty),
+    defaulting to 1 when the quantity is missing or not a whole number."""
+    if isinstance(qty, bool):
+        return 1
+    if isinstance(qty, int) and qty > 0:
+        return qty
+    if isinstance(qty, float) and qty.is_integer() and qty > 0:
+        return int(qty)
+    return 1
+
+
+def _render_distinct_layouts(st, layouts):
+    """Step 2: each distinct threading profile as a colour bar, with how many
+    rolls use it. Placed above Solution quality."""
+    box = st.container(border=True)
+    box.markdown("#### Distinct layouts")
+    box.caption(
+        "Every unique threading profile in this order, drawn left-to-right "
+        "across the roll width, with how many rolls use each one. Identical "
+        "layouts are produced back to back at no setup cost.")
+
+    codes = _ordered_codes(g["layout_signature"] for g in layouts)
+    if codes:
+        box.markdown(_legend_html(codes), unsafe_allow_html=True)
+
+    rows = []
+    for group in layouts:
+        profile = _profile_of(group["layout_signature"])
+        count = group.get("physical_roll_qty")
+        if count is None:
+            count = group.get("roll_entry_count")
+        noun = "roll" if count == 1 else "rolls"
+        rows.append(_row_html(
+            left=f'#{group["layout_index"]}',
+            bar=_bar_html(profile),
+            right=f'{count}&times; {noun}',
+            right_strong=True))
+    box.markdown('<div>' + "".join(rows) + '</div>', unsafe_allow_html=True)
+
+
+def _render_combined_order(st, sequence):
+    """Step 3: the full run in manufacturing order — one bar per physical roll,
+    with the setup change cost incurred to switch to it. Placed at the bottom."""
+    box = st.container(border=True)
+    box.markdown("#### Full manufacturing order")
+    box.caption(
+        "The complete run in manufacturing order — one bar per physical roll. "
+        "Consecutive identical layouts cost nothing to switch between; each "
+        "change shows the inches of threading re-worked to reach it.")
+
+    rows = []
+    position = 0
+    prev_profile = None
+    for entry in sequence:
+        profile = _profile_of(entry.get("layout_signature"))
+        lot = entry.get("navision_lot")
+        for _ in range(_reps_of(entry.get("roll_qty"))):
+            position += 1
+            if prev_profile is None:
+                right, strong = "start", False
+            else:
+                change = _clean_number(profile_cost(prev_profile, profile))
+                right = f"+{change} in" if change else "0 in"
+                strong = bool(change)
+            label = f'{position}.'
+            if lot is not None:
+                label += f' {html.escape(str(lot))}'
+            rows.append(_row_html(label, _bar_html(profile), right,
+                                  right_strong=strong))
+            prev_profile = profile
+    box.markdown('<div>' + "".join(rows) + '</div>', unsafe_allow_html=True)
+
+
+# --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
 def _render_report(st, filename, extraction, report):
@@ -83,8 +286,13 @@ def _render_report(st, filename, extraction, report):
 
     st.subheader(filename)
 
+    # Each section sits in its own bordered card so the boundaries between them
+    # are visible at a glance (Step 1).
+
     # Headline numbers.
-    top = st.columns(4)
+    summary = st.container(border=True)
+    summary.markdown("#### Summary")
+    top = summary.columns(4)
     top[0].metric("Rolls", report["roll_count"])
     top[1].metric("Distinct layouts", report["distinct_layout_count"])
     top[2].metric("Achieved setup cost", f"{report['achieved_cost_in']} in")
@@ -93,18 +301,24 @@ def _render_report(st, filename, extraction, report):
                   help=report["method"])
 
     # Conservation — the sequence must be a faithful reordering of the order.
+    cons = st.container(border=True)
+    cons.markdown("#### Conservation")
     if conservation["passed"]:
-        st.success("Conservation check passed: every roll, quantity and total "
-                   "is preserved; only the manufacturing order changed.")
+        cons.success("Conservation check passed: every roll, quantity and total "
+                     "is preserved; only the manufacturing order changed.")
     else:
-        st.error("Conservation check failed — the sequence is not a faithful "
-                 "reordering of the order:")
+        cons.error("Conservation check failed — the sequence is not a faithful "
+                   "reordering of the order:")
         for discrepancy in conservation["discrepancies"]:
-            st.write(f"- {discrepancy}")
+            cons.write(f"- {discrepancy}")
+
+    # Distinct layouts (Step 2) — sits just above Solution quality.
+    _render_distinct_layouts(st, report["layouts"])
 
     # Solution quality.
-    st.markdown("**Solution quality**")
-    quality_cols = st.columns(3)
+    qbox = st.container(border=True)
+    qbox.markdown("#### Solution quality")
+    quality_cols = qbox.columns(3)
     quality_cols[0].metric("Lower bound (MST)", f"{quality['lower_bound_in']} in")
     gap_ratio = quality["gap_ratio"]
     quality_cols[1].metric(
@@ -123,32 +337,38 @@ def _render_report(st, filename, extraction, report):
             help="Too many distinct layouts to solve exactly as an oracle; "
                  "quality is reported against the lower bound.")
 
-    st.caption(
+    qbox.caption(
         f"As-extracted order cost, for reference only (assigned by sales, not a "
         f"target): {report['reference_only_as_extracted_cost_in']} in.")
 
     # Manufacturing sequence.
-    st.markdown("**Manufacturing sequence**")
-    st.dataframe(report["manufacturing_sequence"], hide_index=True)
+    seqbox = st.container(border=True)
+    seqbox.markdown("#### Manufacturing sequence")
+    seqbox.dataframe(report["manufacturing_sequence"], hide_index=True)
 
     # Transition breakdown.
-    st.markdown("**Transition breakdown**")
-    breakdown_cols = st.columns(4)
+    tbox = st.container(border=True)
+    tbox.markdown("#### Transition breakdown")
+    breakdown_cols = tbox.columns(4)
     breakdown_cols[0].metric("Transitions", breakdown["transition_count"])
     breakdown_cols[1].metric("Zero-cost (identical)",
                              breakdown["zero_cost_transitions"])
     breakdown_cols[2].metric("Max change", f"{breakdown['max_transition_cost']} in")
     breakdown_cols[3].metric("Mean change", f"{breakdown['mean_transition_cost']} in")
     if breakdown["transition_costs"]:
-        st.caption("Per-transition setup change cost (inches), in "
-                   "manufacturing order:")
-        st.bar_chart(breakdown["transition_costs"])
+        tbox.caption("Per-transition setup change cost (inches), in "
+                     "manufacturing order:")
+        tbox.bar_chart(breakdown["transition_costs"])
+
+    # Full manufacturing order (Step 3) — the combined run, at the bottom.
+    _render_combined_order(st, report["manufacturing_sequence"])
 
     # Warnings and JSON download.
+    footer = st.container(border=True)
     for warning in report["warnings"]:
-        st.warning(warning)
+        footer.warning(warning)
 
-    st.download_button(
+    footer.download_button(
         "Download sequence report (JSON)",
         data=report_json(report),
         file_name=f"{Path(filename).stem}.sequence.json",

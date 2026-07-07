@@ -245,6 +245,25 @@ sidebar exposes the same two thresholds as the CLI: the distinct-layout count
 below which the sequence is solved exactly, and the count below which an exact
 oracle is still run to report the true optimality gap.
 
+Each report is laid out as a set of bordered section cards, and two of them draw
+the layouts as colour bars — a roll's threading profile shown left to right
+across the roll width, with a 1px separator between segments so every boundary
+is visible:
+
+- **Distinct layouts** (above solution quality): one bar per unique threading
+  profile in the order, with how many rolls use it and a colour legend. Yarn
+  codes map to sensible real colours (field green stays green, white stays
+  white); unrecognised codes get a stable fallback colour, so the same code is
+  the same colour in every bar.
+- **Full manufacturing order** (at the bottom): one bar per physical roll in
+  manufacturing order — `roll_qty` is expanded, so an entry for five rolls draws
+  five bars — with the setup change cost (inches re-threaded) incurred to reach
+  each roll. Runs of identical consecutive layouts read as a block of matching
+  bars at zero cost.
+
+These are display-only: they read the layout signatures already in the Phase 4
+report and add no sequencing logic.
+
 The extraction/optimisation pipeline is factored into `analyse_upload`, which
 imports no Streamlit, so it can be exercised without a browser; Streamlit is
 imported inside `main`, keeping the module importable for tests even when
