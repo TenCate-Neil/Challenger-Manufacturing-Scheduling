@@ -144,7 +144,12 @@ These are the confirmed assumptions the plan rests on.
    single order, so they do not affect within-order sequencing; they become
    relevant only for grouping across orders in a later phase.
 5. The colour/type code at a position fully identifies what is threaded there.
-6. **Fresh start.** There is no fixed starting machine state; the sequence is
+6. **Roll identity.** Each roll is identified by its `navision_lot` number, with
+   `sort` as a stable secondary index. A lot entry may cover several physical
+   rolls (`roll_qty` > 1) and may carry continuation panels
+   (`additional_panel_layouts`). Phase 1 verifies lot numbers are unique within
+   an order.
+7. **Fresh start.** There is no fixed starting machine state; the sequence is
    free to start anywhere. Costing the first transition from a known current
    threading is deferred to the later cross-order scheduling phase (see below).
 
@@ -160,8 +165,19 @@ confirmed and folded into the assumptions above.
   function reproduces the 5-inch example.
 - **Phase 2:** collapse duplicates and build the distance graph.
 - **Phase 3:** sequencing engine (exact for small orders, heuristic for large).
-- **Phase 4:** evaluation and reporting (conservation, before/after cost,
-  transition breakdown); emit the optimised sequence.
-- **Phase 5 (out of scope now):** combining rolls from multiple orders into one
+- **Phase 4:** evaluation and reporting (conservation, achieved cost,
+  transition breakdown); emit the optimised sequence as JSON.
+- **Phase 5 (MVP front end):** a thin Streamlit app that wraps the same core
+  functions — upload an order workbook, run extraction and optimisation, and
+  show the ordered sequence, achieved cost, and transition breakdown. It runs
+  locally (`streamlit run app.py`); no hosting or backend to deploy.
+- **Phase 6 (out of scope now):** combining rolls from multiple orders into one
   schedule, and seeding the sequence from the machine's current threading (a
   known start state) rather than a fresh start.
+
+## 10. Delivery approach
+
+The core logic is plain Python that reuses the existing `extract_turf_layout.py`
+extractor, and is testable from a CLI on its own. The Streamlit app (Phase 5) is
+a thin front end over those same functions, so no logic is duplicated or thrown
+away. `streamlit` will be added to `requirements.txt` when Phase 5 begins.
