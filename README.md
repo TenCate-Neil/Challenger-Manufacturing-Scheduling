@@ -62,3 +62,45 @@ Surfaces). If a workbook uses an unrecognized logo, the output will contain
 
 Warnings are returned per-file in the `warnings` list and also printed to
 the console when running the script.
+
+## Roll sequencing cost model (Phase 1)
+
+`roll_sequencing.py` is the costing layer described in
+`docs/optimisation_plan.md`. It measures how expensive a manufacturing
+sequence is to set up; it does not reorder anything (choosing a cheaper
+sequence is a later phase).
+
+Each roll is treated as a positional profile across the roll width. The
+setup change cost between two consecutive rolls is the total width, in
+inches, of the positions whose colour/type code differs:
+
+```
+cost(A, B) = sum of widths where profile_A(x) != profile_B(x)
+```
+
+The cost is symmetric, and two identical layouts cost 0. The cost of a whole
+sequence is the sum of its adjacent-pair costs. For the worked example in the
+plan — a 182" `FG` roll followed by a 177" `FG` + 5" `WHI` roll — only the
+final 5 inches change, so the cost is 5.
+
+Score an extraction result in the order its rolls appear:
+
+```bash
+python roll_sequencing.py EXTRACTED.json [EXTRACTED2.json ...]
+```
+
+This prints the total setup cost and a transition breakdown (how many
+transitions are zero-cost and the distribution of the rest). The as-extracted
+order is assigned by sales and is not a target to beat; scoring it is just a
+way to exercise the model.
+
+The module exposes the same functions for reuse by later phases and a future
+front end: `transition_cost(roll_a, roll_b)`, `sequence_cost(rolls)`, and
+`transition_breakdown(rolls)`.
+
+Run the tests (no extra dependencies required):
+
+```bash
+python test_roll_sequencing.py     # standalone runner
+pytest test_roll_sequencing.py     # if pytest is installed
+```
