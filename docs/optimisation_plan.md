@@ -79,6 +79,16 @@ back to its full quantity at the end. This usually shrinks the problem from
 "number of rolls" to a much smaller "number of distinct layouts", which is what
 makes exact solving feasible for many orders.
 
+The extractor now does this grouping for us. Each roll in the extracted JSON
+carries a `layout_signature` (its ordered width/colour segments, e.g.
+`5WHI|177LIM` — length plays no part) and a `layout_group` id shared by every
+roll with that signature; the extraction result also reports
+`distinct_layout_count`. Step 1 is therefore a lookup, not a computation:
+partition rolls by `layout_group`, sequence the `distinct_layout_count`
+groups, and expand each back out by the rolls it contains. This is what makes
+exact solving via Held-Karp feasible even for orders with many rolls, since
+the DP's state space scales with distinct layouts, not roll count.
+
 **Step 2 — Build the distance graph.**
 Compute the pairwise setup cost between every pair of distinct layouts.
 
@@ -96,7 +106,8 @@ the final manufacturing sequence.
 
 ## 5. Grouping identical and similar layouts
 
-Identical layouts are handled exactly by Step 1 above.
+Identical layouts are handled exactly by Step 1 above, using the
+`layout_group` marker already produced during extraction.
 
 For *similar* (not identical) layouts, we do not need a separate clustering
 stage to get good results — the distance-minimising sequence already tends to
