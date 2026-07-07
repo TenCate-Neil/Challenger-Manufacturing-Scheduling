@@ -319,6 +319,14 @@ def _find_table_end(ws, start_row, max_scan=1000):
     return None
 
 
+def layout_signature(segments):
+    """Identity of a roll's physical layout: the ordered width/colour
+    segments across the roll, left to right. Length (mfg_roll_length_lf)
+    plays no part - two rolls with this same signature are threaded
+    identically and are interchangeable for sequencing purposes."""
+    return tuple((s["width_in"], s["color_code"]) for s in segments)
+
+
 def extract_rolls(ws, legend, warnings):
     require(ws, "A680", "Sort", warnings, "roll table header")
 
@@ -379,6 +387,7 @@ def extract_rolls(ws, legend, warnings):
                 "roll_width_in": roll_width,
                 "segments": segments,
                 "additional_panel_layouts": [],
+                "layout_signature": layout_signature(segments),
             }
             rolls.append(current_roll)
         else:
@@ -401,6 +410,14 @@ def extract_rolls(ws, legend, warnings):
                 "roll_type": to_clean(ws.cell(row=row, column=5).value),
                 "segments": segments,
             })
+
+    group_ids = {}
+    for roll in rolls:
+        sig = roll["layout_signature"]
+        if sig not in group_ids:
+            group_ids[sig] = len(group_ids) + 1
+        roll["layout_group"] = group_ids[sig]
+        roll["layout_signature"] = "|".join(f"{w}{c}" for w, c in sig)
 
     return rolls, setup_group
 
@@ -432,6 +449,7 @@ def extract_workbook(xlsx_path):
         "yarn_skus": yarn_skus,
         "rolls": rolls,
         "roll_count": len(rolls),
+        "distinct_layout_count": len({r["layout_group"] for r in rolls}),
         "setup_change_count": num_setup_groups - 1,
         "warnings": warnings,
     }

@@ -32,6 +32,12 @@ One JSON file is written per input workbook.
   follow-up row) are folded into `additional_panel_layouts` instead of being
   miscounted as separate rolls. `setup_group` increments on every
   `SETUP CHANGE` marker, matching the physical creel reconfiguration count.
+  Each roll also carries a `layout_signature` (the ordered width/colour
+  segments, e.g. `5inWHI|177inLIM`) and a `layout_group` id: rolls sharing
+  the same signature have an identical physical layout - length
+  (`mfg_roll_length_lf`) plays no part in this - and are interchangeable for
+  sequencing purposes. `distinct_layout_count` at the top level reports how
+  many distinct layout groups the order contains.
 
 ## The Brand field
 
