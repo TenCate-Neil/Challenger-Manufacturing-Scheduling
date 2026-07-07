@@ -271,7 +271,11 @@ order, one row per physical roll (`roll_qty` expanded, exactly as the full
 manufacturing order view), and shows the position, Navision lot number, panel
 numbers, length (LF), the same layout colour bar, and the per-step setup change
 cost. A header carries the source file, total setup cost, and roll/layout
-counts. It is rendered with [fpdf2](https://py-pdf.github.io/fpdf2/), which is
+counts, and a **Layout threading breakdown** section at the bottom spells out the
+exact threading width of each distinct layout (e.g. `177 in FG   5 in WHI   =
+182 in total`) with the lots that use it, so the floor has the precise tufting
+spec and not only the visual bar. It is rendered with
+[fpdf2](https://py-pdf.github.io/fpdf2/), which is
 pure Python — a plain `pip install`, with no system libraries or browser to set
 up — and the colour bars are drawn from the same colour mapping as the on-screen
 ones. Where fpdf2 is not installed the app falls back to a note and the rest of
