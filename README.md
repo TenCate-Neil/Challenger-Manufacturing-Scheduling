@@ -140,3 +140,42 @@ Tests:
 python test_layout_graph.py        # standalone runner
 pytest test_layout_graph.py        # if pytest is installed
 ```
+
+## Sequencing engine (Phase 3)
+
+`sequencer.py` chooses the order in which the distinct layouts are
+manufactured to minimise total setup change cost — Step 3 of
+`docs/optimisation_plan.md` section 4.
+
+The problem is the **open-path** form of the symmetric Travelling Salesman
+Problem: order the distinct layouts so the summed positional inch mismatch is
+lowest. It is an open path, not a cycle — the sequence may start and end
+anywhere and never returns to its start, matching the "fresh start" assumption
+(no fixed current machine threading to cost against).
+
+Tiered solver:
+
+- **Small orders** (at most `--exact-max-layouts`, default 15 distinct
+  layouts): solved exactly with a **Held–Karp** dynamic program, returning the
+  proven minimum-cost order.
+- **Larger orders**: a **multi-start nearest-neighbour** construction improved
+  by **2-opt** and **Or-opt** local search, returning a near-optimal order.
+
+`optimise(rolls)` ties it together: collapse duplicates and build distances
+(Phase 2), sequence the distinct layouts, then expand back to the full roll
+sequence (conserving every roll). It returns the layout order, the expanded
+`sequence`, the achieved `cost`, the `method`, and whether the result is a
+proven `optimal`.
+
+```bash
+python sequencer.py EXTRACTED.json [EXTRACTED2.json ...]
+python sequencer.py EXTRACTED.json --exact-max-layouts 12
+```
+
+Tests (includes a brute-force optimum oracle for small instances and a
+heuristic-vs-exact quality check):
+
+```bash
+python test_sequencer.py           # standalone runner
+pytest test_sequencer.py           # if pytest is installed
+```
