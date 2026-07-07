@@ -144,14 +144,14 @@ These are the confirmed assumptions the plan rests on.
    single order, so they do not affect within-order sequencing; they become
    relevant only for grouping across orders in a later phase.
 5. The colour/type code at a position fully identifies what is threaded there.
+6. **Fresh start.** There is no fixed starting machine state; the sequence is
+   free to start anywhere. Costing the first transition from a known current
+   threading is deferred to the later cross-order scheduling phase (see below).
 
-## 8. Remaining open question
+## 8. Open questions
 
-- **Known start state.** We currently assume there is no fixed starting machine
-  state — the sequence is free to start anywhere. If the machine's current
-  threading is known at planning time, the first transition should be costed
-  from it, which is a small extension (fix the first node). Please confirm
-  whether the start state is known; otherwise we proceed with a free start.
+None outstanding for this phase. All points raised in review have been
+confirmed and folded into the assumptions above.
 
 ## 9. Proposed phases
 
@@ -162,4 +162,6 @@ These are the confirmed assumptions the plan rests on.
 - **Phase 3:** sequencing engine (exact for small orders, heuristic for large).
 - **Phase 4:** evaluation and reporting (conservation, before/after cost,
   transition breakdown); emit the optimised sequence.
-- **Phase 5 (out of scope now):** combining multiple orders.
+- **Phase 5 (out of scope now):** combining rolls from multiple orders into one
+  schedule, and seeding the sequence from the machine's current threading (a
+  known start state) rather than a fresh start.
