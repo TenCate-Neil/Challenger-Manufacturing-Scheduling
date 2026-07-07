@@ -54,6 +54,15 @@ Two useful consequences:
 The cost of a full sequence is the sum of the costs of each adjacent pair. Cost
 depends only on neighbouring rolls, not on earlier history.
 
+Because each creel sits at a fixed location and the gauge is constant across an
+order, an inch position maps to a fixed set of creel ends. Changing the
+colour/type at a position means re-threading those ends. Re-threading is roughly
+fixed time per inch, so total inches changed across the sequence is proportional
+to total changeover time. We therefore minimise total inches changed and add
+**no** fixed per-stoppage penalty: a single large change is not disproportionately
+worse than several small ones, and minimising total inches already minimises the
+whole changeover time.
+
 ## 4. Problem shape and proposed approach
 
 Reordering rolls to minimise the sum of adjacent setup costs is a
@@ -98,56 +107,57 @@ propose to treat it as an optional accelerator, not a core requirement.
 
 ## 6. How the result will be evaluated
 
-The optimised sequence will be checked against the original Excel order on
-three fronts:
+The order in which rolls appear in the Excel file is assigned by sales with no
+attention paid to manufacturing sequence, so it is not a meaningful baseline. We
+do **not** compare against it. The optimised sequence is evaluated on its own
+merits:
 
 1. **Conservation.** The set of rolls, their quantities, and totals (linear
-   feet, square feet) in the optimised sequence must exactly match the original.
-   Nothing is added, dropped, or altered. Each roll's own layout is never
-   modified — we only reorder.
-2. **Cost comparison.** We compute the total setup change cost of the original
-   Excel sequence (baseline) and of the optimised sequence, and report the
-   reduction in inches re-threaded. The extraction already records a
-   `setup_change_count`, which gives us a baseline to compare against.
-3. **Transition breakdown.** We report how many transitions are zero-cost
+   feet, square feet) in the optimised sequence must exactly match the order as
+   extracted. Nothing is added, dropped, or altered. Each roll's own layout is
+   never modified — we only reorder.
+2. **Achieved cost.** We report the total setup change cost (inches re-threaded)
+   of the optimised sequence in absolute terms.
+3. **Solution quality.** For small orders solved exactly, the result is the
+   proven minimum. For larger orders solved heuristically, we report the gap
+   between the heuristic cost and a computed lower bound (and, where feasible,
+   against the exact optimum on small instances) so the quality of the sequence
+   can be judged rather than taken on trust.
+4. **Transition breakdown.** We report how many transitions are zero-cost
    (identical consecutive rolls) and the distribution of the remaining
-   transition costs, so the saving can be inspected rather than taken on trust.
+   transition costs, so the result can be inspected.
 
 ## 7. Assumptions
 
-These are the working assumptions the plan rests on. Please confirm or correct.
+These are the confirmed assumptions the plan rests on.
 
 1. Optimisation is within a single order only (current scope).
-2. Rolls keep a fixed left-to-right orientation and are not flipped/reversed.
-3. Roll width is constant across the order. Differing widths are treated as an
-   open question (see below).
-4. Cost is the positional inch mismatch, symmetric, and additive over adjacent
-   pairs only.
-5. There is no fixed starting machine state; the sequence is free to start
-   anywhere. A known current threading can be added later as a fixed first roll.
-6. The colour/type code at a position fully identifies what is threaded there.
+2. **Fixed orientation.** The tufting machine has a fixed orientation and
+   direction of tufting, which affects the finished product. Rolls are never
+   flipped or reversed.
+3. **Fixed widths and creel locations.** Roll width is constant across the order
+   and each creel sits at a fixed location, so layouts always align positionally
+   from the front of the machine.
+4. **Cost unit is inches.** Cost is the positional inch mismatch — symmetric,
+   additive over adjacent pairs only, and linear in inches (no fixed
+   per-stoppage penalty). Gauge and pile height are identical for all rolls in a
+   single order, so they do not affect within-order sequencing; they become
+   relevant only for grouping across orders in a later phase.
+5. The colour/type code at a position fully identifies what is threaded there.
 
-## 8. Open questions for review
+## 8. Remaining open question
 
-- **Cost unit.** We are measuring in inches. The physical creel is a discrete
-  set of ends set by the gauge. Inches is a good proxy and converts to ends
-  later if needed — is inches the right unit to optimise on for now?
-- **Roll reversal.** Is it physically acceptable to run a roll reversed? If so,
-  it roughly doubles the options and can lower cost, but adds complexity.
-- **Differing widths.** Can widths vary within one order, and if so, how should
-  the unused width at the end of a narrower roll be treated — as "no change" or
-  as a change?
-- **Fixed per-change penalty.** Should we add a fixed cost per stoppage so the
-  plan prefers a few large changes over many tiny ones, or is total inches the
-  only thing that matters?
-- **Known start state.** Is the machine's current threading known at planning
-  time, so the first transition should be costed from it?
+- **Known start state.** We currently assume there is no fixed starting machine
+  state — the sequence is free to start anywhere. If the machine's current
+  threading is known at planning time, the first transition should be costed
+  from it, which is a small extension (fix the first node). Please confirm
+  whether the start state is known; otherwise we proceed with a free start.
 
 ## 9. Proposed phases
 
 - **Phase 0 (this document):** agree logic and assumptions.
-- **Phase 1:** build the cost model and a baseline evaluator that scores the
-  original Excel sequence; verify it reproduces the 5-inch example.
+- **Phase 1:** build the cost model and a sequence scorer; verify the cost
+  function reproduces the 5-inch example.
 - **Phase 2:** collapse duplicates and build the distance graph.
 - **Phase 3:** sequencing engine (exact for small orders, heuristic for large).
 - **Phase 4:** evaluation and reporting (conservation, before/after cost,
