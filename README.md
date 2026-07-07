@@ -179,3 +179,47 @@ heuristic-vs-exact quality check):
 python test_sequencer.py           # standalone runner
 pytest test_sequencer.py           # if pytest is installed
 ```
+
+## Evaluation and reporting (Phase 4)
+
+`evaluate.py` takes the optimised sequence from Phase 3 and reports whether it
+can be trusted and how good it is — the four criteria in
+`docs/optimisation_plan.md` section 6. It adds no sequencing logic; it measures
+and explains the Phase 3 result, and emits the optimised sequence as JSON.
+
+- **Conservation** (`check_conservation`): the optimised sequence must be a
+  faithful reordering of the order as extracted — same rolls, same quantities,
+  same linear/square-foot totals, and no roll's own layout altered. Each check
+  records the original and sequenced value; any discrepancy is listed rather
+  than hidden. When the full extraction is available its MFG summary totals are
+  cross-checked as a second, independent source.
+- **Achieved cost**: the total setup change cost (inches re-threaded) of the
+  optimised sequence, in absolute terms, carried straight from Phase 3.
+- **Solution quality** (`solution_quality`): for orders solved exactly the
+  result is the proven minimum (gap 0). Otherwise we report the gap to a
+  **minimum spanning tree lower bound** — a valid floor, because any
+  Hamiltonian path is itself a spanning tree and so cannot cost less than the
+  cheapest one. Where the instance is small enough (`--oracle-max-layouts`,
+  default 16) we also solve it exactly as an oracle and report the *true* gap.
+- **Transition breakdown**: how many transitions are zero-cost (identical
+  consecutive rolls) and the distribution of the rest (reused from Phase 1).
+
+`evaluate(rolls)` returns a single JSON-serialisable report tying these
+together, including the ordered `manufacturing_sequence` with the setup change
+cost incurred at each step. `report_json` renders it to JSON.
+
+```bash
+python evaluate.py EXTRACTED.json [EXTRACTED2.json ...]
+python evaluate.py EXTRACTED.json -o reports/   # also write <stem>.sequence.json
+```
+
+The CLI prints a summary and, with `-o`, writes the full report per input. It
+exits non-zero if any order fails its conservation check.
+
+Tests (conservation pass/fail, the lower bound never exceeding the optimum, and
+JSON-serialisability):
+
+```bash
+python test_evaluate.py            # standalone runner
+pytest test_evaluate.py            # if pytest is installed
+```
