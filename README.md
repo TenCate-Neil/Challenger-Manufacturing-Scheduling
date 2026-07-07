@@ -179,3 +179,81 @@ heuristic-vs-exact quality check):
 python test_sequencer.py           # standalone runner
 pytest test_sequencer.py           # if pytest is installed
 ```
+
+## Evaluation and reporting (Phase 4)
+
+`evaluate.py` takes the optimised sequence from Phase 3 and reports whether it
+can be trusted and how good it is — the four criteria in
+`docs/optimisation_plan.md` section 6. It adds no sequencing logic; it measures
+and explains the Phase 3 result, and emits the optimised sequence as JSON.
+
+- **Conservation** (`check_conservation`): the optimised sequence must be a
+  faithful reordering of the order as extracted — same rolls, same quantities,
+  same linear/square-foot totals, and no roll's own layout altered. Each check
+  records the original and sequenced value; any discrepancy is listed rather
+  than hidden. When the full extraction is available its MFG summary totals are
+  cross-checked as a second, independent source.
+- **Achieved cost**: the total setup change cost (inches re-threaded) of the
+  optimised sequence, in absolute terms, carried straight from Phase 3.
+- **Solution quality** (`solution_quality`): for orders solved exactly the
+  result is the proven minimum (gap 0). Otherwise we report the gap to a
+  **minimum spanning tree lower bound** — a valid floor, because any
+  Hamiltonian path is itself a spanning tree and so cannot cost less than the
+  cheapest one. Where the instance is small enough (`--oracle-max-layouts`,
+  default 16) we also solve it exactly as an oracle and report the *true* gap.
+- **Transition breakdown**: how many transitions are zero-cost (identical
+  consecutive rolls) and the distribution of the rest (reused from Phase 1).
+
+`evaluate(rolls)` returns a single JSON-serialisable report tying these
+together, including the ordered `manufacturing_sequence` with the setup change
+cost incurred at each step. `report_json` renders it to JSON.
+
+```bash
+python evaluate.py EXTRACTED.json [EXTRACTED2.json ...]
+python evaluate.py EXTRACTED.json -o reports/   # also write <stem>.sequence.json
+```
+
+The CLI prints a summary and, with `-o`, writes the full report per input. It
+exits non-zero if any order fails its conservation check.
+
+Tests (conservation pass/fail, the lower bound never exceeding the optimum, and
+JSON-serialisability):
+
+```bash
+python test_evaluate.py            # standalone runner
+pytest test_evaluate.py            # if pytest is installed
+```
+
+## MVP front end (Phase 5)
+
+`app.py` is a thin [Streamlit](https://streamlit.io) front end over the same
+core functions the CLI uses (`docs/optimisation_plan.md`, Phase 5). It adds no
+logic of its own: it uploads an order workbook, runs the existing extractor and
+the Phase 4 evaluator, and shows the ordered manufacturing sequence, the
+achieved setup cost, the solution quality, the conservation result, and the
+transition breakdown. The JSON report can be downloaded.
+
+It runs locally — there is nothing to host or deploy:
+
+```bash
+pip install -r requirements.txt   # now includes streamlit
+streamlit run app.py
+```
+
+Upload one or more `.xlsx` order workbooks (the `FIELD LAYOUT` sheet). The
+sidebar exposes the same two thresholds as the CLI: the distinct-layout count
+below which the sequence is solved exactly, and the count below which an exact
+oracle is still run to report the true optimality gap.
+
+The extraction/optimisation pipeline is factored into `analyse_upload`, which
+imports no Streamlit, so it can be exercised without a browser; Streamlit is
+imported inside `main`, keeping the module importable for tests even when
+Streamlit is not installed.
+
+Tests drive the app headlessly through Streamlit's `AppTest` harness and skip
+cleanly when Streamlit (or the extractor's `openpyxl`) is not installed:
+
+```bash
+python test_app.py                 # standalone runner
+pytest test_app.py                 # if pytest is installed
+```
