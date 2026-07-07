@@ -20,7 +20,9 @@ For each input workbook, writes a JSON file with:
 
 import argparse
 import hashlib
+import io
 import json
+import os
 import re
 import sys
 import zipfile
@@ -425,15 +427,35 @@ def extract_rolls(ws, legend, warnings):
 # --------------------------------------------------------------------------
 # Top-level extraction
 # --------------------------------------------------------------------------
-def extract_workbook(xlsx_path):
+def extract_workbook(source, source_name=None):
+    """Extract one order workbook.
+
+    `source` may be a filesystem path (str / os.PathLike) or the workbook's raw
+    bytes / a binary file-like object. Passing bytes avoids writing a temporary
+    file, which sidesteps Windows file-locking (e.g. antivirus scanning a
+    freshly written temp file) when the front end hands over an upload. When
+    `source` is not a path, `source_name` is used for the reported
+    `source_file`."""
     warnings = []
-    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
+
+    if isinstance(source, (str, os.PathLike)):
+        wb = openpyxl.load_workbook(source, data_only=True)
+        image_source = source
+        resolved_name = Path(source).name
+    else:
+        # Raw bytes or a binary file-like object. Give each reader its own
+        # buffer so neither is affected by the other's position or closing.
+        data = source.read() if hasattr(source, "read") else bytes(source)
+        wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+        image_source = io.BytesIO(data)
+        resolved_name = source_name or "uploaded_workbook.xlsx"
+
     if SHEET_NAME not in wb.sheetnames:
         raise TemplateMismatch(f"Workbook has no '{SHEET_NAME}' sheet")
     ws = wb[SHEET_NAME]
 
     legend = load_color_legend(wb)
-    image_hashes = build_rich_value_image_resolver(xlsx_path)
+    image_hashes = build_rich_value_image_resolver(image_source)
 
     general_information = extract_general_information(ws, warnings)
     product_specifications = extract_product_specifications(ws, image_hashes, warnings)
@@ -442,7 +464,7 @@ def extract_workbook(xlsx_path):
     rolls, num_setup_groups = extract_rolls(ws, legend, warnings)
 
     return {
-        "source_file": Path(xlsx_path).name,
+        "source_file": resolved_name,
         "general_information": general_information,
         "product_specifications": product_specifications,
         "mfg_summary": mfg_summary,

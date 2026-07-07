@@ -19,8 +19,6 @@ itself is imported inside `main`, keeping this module importable for tests even
 when Streamlit is not installed.
 """
 
-import os
-import tempfile
 from pathlib import Path
 
 from evaluate import (
@@ -40,29 +38,14 @@ def analyse_upload(filename, file_bytes,
                    oracle_max_layouts=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS):
     """Run the full pipeline on one uploaded workbook's bytes.
 
-    The extractor reads the workbook as a file path (it opens the underlying
-    zip to resolve the embedded brand logo), so the bytes are written to a
-    temporary file first. The temp file is closed before the extractor opens
-    it and removed afterwards: on Windows a still-open `NamedTemporaryFile`
-    cannot be reopened by another handle, which otherwise raises
-    "Permission denied". Returns `(extraction, report)`: the raw extraction
-    dict from `extract_turf_layout` and the Phase 4 evaluation report from
-    `evaluate`. Raises `TemplateMismatch` if the workbook is not a recognised
-    FIELD LAYOUT order."""
-    suffix = Path(filename).suffix or ".xlsx"
-    fd, tmp_path = tempfile.mkstemp(suffix=suffix)
-    try:
-        with os.fdopen(fd, "wb") as tmp:
-            tmp.write(file_bytes)
-        extraction = extract_workbook(tmp_path)
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-
-    # Preserve the original file name rather than the temp file's.
-    extraction["source_file"] = filename
+    The workbook bytes are passed straight to the extractor, which reads them
+    in memory. Nothing is written to disk, so there is no temporary file for
+    Windows (or antivirus scanning it) to lock — earlier a temp-file approach
+    failed with "[Errno 13] Permission denied". Returns `(extraction, report)`:
+    the raw extraction dict from `extract_turf_layout` and the Phase 4
+    evaluation report from `evaluate`. Raises `TemplateMismatch` if the
+    workbook is not a recognised FIELD LAYOUT order."""
+    extraction = extract_workbook(file_bytes, source_name=filename)
 
     report = evaluate(
         extraction.get("rolls", []),
