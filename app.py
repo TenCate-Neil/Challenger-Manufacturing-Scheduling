@@ -7,16 +7,19 @@ A thin Streamlit front end over the same core functions used by the CLI
 order workbook, calls the existing extractor (`extract_turf_layout`) and the
 Phase 4 evaluator (`evaluate`), and shows the ordered manufacturing sequence,
 the achieved setup cost, the solution quality, the conservation result, and the
-transition breakdown. The JSON report can be downloaded.
+transition breakdown. The JSON report can be downloaded, as can a printable PDF
+"run sheet" for the manufacturing floor (one row per physical roll, with the
+layout colour bars rendered via WeasyPrint).
 
 There is no logic duplicated here and nothing to deploy — it runs locally:
 
     streamlit run app.py
 
-The extraction/optimisation pipeline is factored into `analyse_upload`, which
-imports no Streamlit, so it can be exercised without a browser. Streamlit
-itself is imported inside `main`, keeping this module importable for tests even
-when Streamlit is not installed.
+The extraction/optimisation pipeline is factored into `analyse_upload`, and the
+run sheet into `build_run_sheet_html` / `build_run_sheet_pdf`; none of these
+import Streamlit, so they can be exercised without a browser. Streamlit itself is
+imported inside `main`, keeping this module importable for tests even when
+Streamlit is not installed.
 """
 
 import hashlib
@@ -277,6 +280,154 @@ def _render_combined_order(st, sequence):
 
 
 # --------------------------------------------------------------------------
+# Printable run sheet (HTML -> PDF) — testable without Streamlit
+# --------------------------------------------------------------------------
+# The manufacturing floor wants a paper run sheet, not JSON. It lists the rolls
+# in manufacturing order — one row per physical roll (roll_qty expanded, exactly
+# as the "Full manufacturing order" view does) — with the same colour-bar visual
+# of each layout so an operator can eyeball the threading. It is built as HTML
+# and rendered to PDF with WeasyPrint, which keeps the colour bars intact. The
+# HTML builder takes no Streamlit and depends on no PDF library, so it can be
+# asserted on directly in tests; only `build_run_sheet_pdf` needs WeasyPrint.
+def _run_sheet_row_html(position, lot, panels, length, bar, change):
+    """One table row of the run sheet: position, Navision lot, panel numbers,
+    length in linear feet, the layout colour bar, and the setup change cost
+    incurred to switch to this roll."""
+    lot_txt = html.escape(str(lot)) if lot is not None else ""
+    panels_txt = html.escape(str(panels)) if panels not in (None, "") else ""
+    length_txt = (html.escape(f"{_clean_number(length)}")
+                  if isinstance(length, (int, float)) and not isinstance(length, bool)
+                  else "")
+    return (
+        "<tr>"
+        f'<td class="pos">{position}</td>'
+        f'<td class="lot">{lot_txt}</td>'
+        f'<td class="panels">{panels_txt}</td>'
+        f'<td class="len">{length_txt}</td>'
+        f'<td class="bar">{bar}</td>'
+        f'<td class="chg">{html.escape(change)}</td>'
+        "</tr>")
+
+
+def build_run_sheet_html(filename, report):
+    """Build the printable run sheet as a standalone HTML document.
+
+    Rolls are listed in manufacturing order, one row per physical roll: the
+    `roll_qty` of each sequence entry is expanded so a two-roll entry becomes
+    two rows, matching the "Full manufacturing order" view. Each row shows the
+    position, Navision lot number, panel numbers, length (LF), a colour-bar
+    visual of the layout (the same `_bar_html` mapping used on screen), and the
+    per-step setup change cost in inches. A header carries the source file, the
+    total achieved setup cost, and the roll/layout counts.
+
+    Takes no Streamlit and no PDF library, so it is testable on its own."""
+    sequence = report.get("manufacturing_sequence", [])
+    source = report.get("source_file") or filename
+    total_cost = report.get("achieved_cost_in")
+    roll_count = report.get("roll_count")
+    layout_count = report.get("distinct_layout_count")
+
+    codes = _ordered_codes(entry.get("layout_signature") for entry in sequence)
+    legend = _legend_html(codes) if codes else ""
+
+    rows = []
+    position = 0
+    prev_profile = None
+    for entry in sequence:
+        profile = _profile_of(entry.get("layout_signature"))
+        lot = entry.get("navision_lot")
+        panels = entry.get("panel_numbers")
+        length = entry.get("mfg_roll_length_lf")
+        for _ in range(_reps_of(entry.get("roll_qty"))):
+            position += 1
+            if prev_profile is None:
+                change = "start"
+            else:
+                delta = _clean_number(profile_cost(prev_profile, profile))
+                change = f"+{delta} in" if delta else "0 in"
+            rows.append(_run_sheet_row_html(
+                position, lot, panels, length, _bar_html(profile), change))
+            prev_profile = profile
+
+    meta_items = [("Source file", html.escape(str(source)))]
+    if total_cost is not None:
+        meta_items.append(("Total setup cost", f"{html.escape(str(total_cost))} in"))
+    if roll_count is not None:
+        meta_items.append(("Rolls", html.escape(str(roll_count))))
+    if layout_count is not None:
+        meta_items.append(("Distinct layouts", html.escape(str(layout_count))))
+    meta_html = "".join(
+        f'<div class="meta-item"><span class="meta-label">{label}</span>'
+        f'<span class="meta-value">{value}</span></div>'
+        for label, value in meta_items)
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Run sheet — {html.escape(str(source))}</title>
+<style>
+  @page {{ size: A4 landscape; margin: 14mm; }}
+  body {{ font-family: "Helvetica Neue", Arial, sans-serif; color: #1b1b1b;
+          font-size: 11px; }}
+  h1 {{ font-size: 18px; margin: 0 0 8px; }}
+  .meta {{ display: flex; flex-wrap: wrap; gap: 6px 28px; margin: 0 0 10px; }}
+  .meta-item {{ display: flex; flex-direction: column; }}
+  .meta-label {{ font-size: 9px; text-transform: uppercase; letter-spacing: .04em;
+                 color: #666; }}
+  .meta-value {{ font-size: 13px; font-weight: 600; }}
+  .legend {{ margin: 0 0 10px; }}
+  table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
+  th, td {{ border: 1px solid #d0d0d0; padding: 4px 6px; vertical-align: middle;
+            text-align: left; box-sizing: border-box; }}
+  thead th {{ background: #f2f2f2; font-size: 9px; text-transform: uppercase;
+              letter-spacing: .04em; }}
+  tbody tr:nth-child(even) td {{ background: #fafafa; }}
+  th.pos, td.pos {{ width: 5%; text-align: right;
+                    font-variant-numeric: tabular-nums; }}
+  th.lot, td.lot {{ width: 15%; font-family: ui-monospace, Menlo, monospace; }}
+  th.panels, td.panels {{ width: 14%; }}
+  th.len, td.len {{ width: 9%; text-align: right;
+                    font-variant-numeric: tabular-nums; }}
+  th.bar, td.bar {{ width: 45%; }}
+  th.chg, td.chg {{ width: 12%; text-align: right;
+                    font-variant-numeric: tabular-nums; }}
+</style>
+</head>
+<body>
+  <h1>Manufacturing run sheet</h1>
+  <div class="meta">{meta_html}</div>
+  {('<div class="legend">' + legend + "</div>") if legend else ""}
+  <table>
+    <thead>
+      <tr>
+        <th class="pos">#</th>
+        <th class="lot">Navision lot #</th>
+        <th class="panels">Panel #s</th>
+        <th class="len">Length (LF)</th>
+        <th class="bar">Layout</th>
+        <th class="chg">Setup change</th>
+      </tr>
+    </thead>
+    <tbody>
+      {"".join(rows)}
+    </tbody>
+  </table>
+</body>
+</html>"""
+
+
+def build_run_sheet_pdf(filename, report):
+    """Render the run sheet to PDF bytes. WeasyPrint is imported lazily so this
+    module (and the rest of the app) stays importable where WeasyPrint's native
+    libraries are not installed; the caller degrades gracefully in that case."""
+    from weasyprint import HTML
+
+    document = build_run_sheet_html(filename, report)
+    return HTML(string=document).write_pdf()
+
+
+# --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
 def _render_report(st, filename, extraction, report):
@@ -363,17 +514,36 @@ def _render_report(st, filename, extraction, report):
     # Full manufacturing order (Step 3) — the combined run, at the bottom.
     _render_combined_order(st, report["manufacturing_sequence"])
 
-    # Warnings and JSON download.
+    # Warnings and downloads.
     footer = st.container(border=True)
     for warning in report["warnings"]:
         footer.warning(warning)
 
-    footer.download_button(
+    stem = Path(filename).stem
+    downloads = footer.columns(2)
+    downloads[0].download_button(
         "Download sequence report (JSON)",
         data=report_json(report),
-        file_name=f"{Path(filename).stem}.sequence.json",
+        file_name=f"{stem}.sequence.json",
         mime="application/json",
     )
+
+    # The printable run sheet needs WeasyPrint; where it (or its native
+    # libraries) is unavailable, fall back to a note rather than erroring so
+    # the rest of the report still works.
+    try:
+        pdf_bytes = build_run_sheet_pdf(filename, report)
+    except Exception as exc:  # noqa: BLE001
+        downloads[1].caption(
+            "Run sheet PDF needs WeasyPrint — install `weasyprint` to enable "
+            f"it ({exc}).")
+    else:
+        downloads[1].download_button(
+            "Download run sheet (PDF)",
+            data=pdf_bytes,
+            file_name=f"{stem}.run-sheet.pdf",
+            mime="application/pdf",
+        )
 
 
 def main():
