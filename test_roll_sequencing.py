@@ -54,6 +54,27 @@ def test_misaligned_segment_boundaries():
     assert rs.transition_cost(a, b) == 10
 
 
+def test_cost_is_positional_not_a_colour_total():
+    # Both rolls contain the same colour *totals* (177 FG + 5 WHI) but in
+    # mirror-image positions: the WHI is at the front on one and at the back
+    # on the other. Cost is per inch position, so a colour-total view would
+    # wrongly say 0 — the real changeover is the 5" at each end that flip
+    # between FG and WHI, i.e. 10 inches.
+    whi_at_front = _roll(("WHI", 5), ("FG", 177))
+    whi_at_back = _roll(("FG", 177), ("WHI", 5))
+    assert rs.transition_cost(whi_at_front, whi_at_back) == 10
+
+
+def test_five_inch_example_changes_the_rightmost_positions():
+    # Roll A is all FG; Roll B puts WHI in the last 5" (positions 177..182).
+    # Only those rightmost 5 locations change; everything before is untouched.
+    assert rs.transition_cost(ROLL_A, ROLL_B) == 5
+    # Moving the same 5" of WHI to the front instead still costs 5 — the model
+    # only cares that 5 locations changed, wherever they are.
+    whi_at_front = _roll(("WHI", 5), ("FG", 177))
+    assert rs.transition_cost(ROLL_A, whi_at_front) == 5
+
+
 def test_fractional_widths():
     # Fractional gauges produce fractional-inch costs from the same formula.
     a = _roll(("FG", 176.5), ("WHI", 5.5))
