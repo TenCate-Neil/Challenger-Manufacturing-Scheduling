@@ -400,11 +400,13 @@ def _latin1(value):
     return str(value).encode("latin-1", "replace").decode("latin-1")
 
 
-def _draw_run_sheet_bar(pdf, x, y, width, height, profile):
+def _draw_run_sheet_bar(pdf, x, y, width, height, profile, label_size=6.5):
     """Draw a roll's threading profile as a horizontal segmented colour bar at
     (x, y), `width` x `height` mm — the PDF twin of `_bar_html`. Segment widths
     are proportional to inches; codes use the same colours as on screen, with a
-    short label centred on any segment wide enough to hold it."""
+    short label centred on any segment wide enough to hold it. `label_size` is
+    the label font size in points — the tall bars of the per-roll threading
+    breakdown pass a much larger size than the table's compact bars."""
     total = sum(seg_w for _, seg_w in profile)
     if total <= 0:
         pdf.set_draw_color(170, 170, 170)
@@ -422,12 +424,14 @@ def _draw_run_sheet_bar(pdf, x, y, width, height, profile):
         pdf.rect(cursor, y, seg, height, style="DF")
 
         label = _latin1(code)
-        pdf.set_font("Helvetica", "B", 6.5)
+        pdf.set_font("Helvetica", "B", label_size)
         if seg >= pdf.get_string_width(label) + 1.5:
             tr, tg, tb = _hex_to_rgb(_text_on(_color_for_code(code)))
             pdf.set_text_color(tr, tg, tb)
+            # Baseline sits just below the vertical centre; the offset scales
+            # with the font size (0.17 mm/pt centres both 6.5 pt and 13 pt).
             pdf.text(cursor + seg / 2 - pdf.get_string_width(label) / 2,
-                     y + height / 2 + 1.1, label)
+                     y + height / 2 + label_size * 0.17, label)
         cursor += seg
 
 
@@ -442,8 +446,9 @@ def build_run_sheet_pdf(filename, report):
     files with different POs), Navision lot number, panel numbers, length (LF),
     a colour bar of the layout, and the per-step setup change cost. A header
     carries the source file, total setup cost, and the roll/layout counts, and a
-    section at the bottom gives the exact threading width of each distinct
-    layout."""
+    large-print section at the bottom gives the exact threading width of every
+    physical roll in manufacturing order, with a red SETUP CHANGE band wherever
+    the layout changes."""
     from fpdf import FPDF
 
     rows = _run_sheet_rows(report)
@@ -543,7 +548,7 @@ def build_run_sheet_pdf(filename, report):
         pdf.cell(w_chg, row_h, _latin1(row["change"]), border=1, align="R")
         pdf.ln(row_h)
 
-    # Exact per-layout threading widths, at the bottom.
+    # Large-print per-roll threading widths, at the bottom.
     _draw_layout_breakdowns(pdf, report)
 
     return bytes(pdf.output())
@@ -586,106 +591,114 @@ def _profile_signature(profile):
     return "|".join(f"{width}{code}" for code, width in profile)
 
 
-def _distinct_layouts(report):
-    """The distinct layouts in the order, in first-appearance (manufacturing)
-    order. Each entry carries the parsed profile, how many physical rolls use
-    it (roll_qty summed), and the Navision lots that use it — the data behind
-    the exact per-layout threading breakdown."""
-    order = []
-    seen = {}
-    for entry in report.get("manufacturing_sequence", []):
-        profile = _profile_of(entry.get("layout_signature"))
-        key = _profile_signature(profile)
-        info = seen.get(key)
-        if info is None:
-            info = {"profile": profile, "roll_count": 0, "lots": []}
-            seen[key] = info
-            order.append(key)
-        info["roll_count"] += _reps_of(entry.get("roll_qty"))
-        lot = entry.get("navision_lot")
-        if lot is not None and lot not in info["lots"]:
-            info["lots"].append(lot)
-    return [seen[key] for key in order]
-
-
 def _draw_layout_breakdowns(pdf, report):
-    """Draw the exact threading breakdown of each distinct layout at the bottom
-    of the run sheet: the colour bar plus its segment widths spelled out (e.g.
-    "177 in FG    5 in WHI    = 182 in total"), so the floor has the precise
-    tufting spec and not only the visual bar. One block per distinct layout, in
-    manufacturing order, with the lots that use it."""
-    layouts = _distinct_layouts(report)
-    if not layouts:
+    """Draw the threading breakdown of every physical roll at the bottom of
+    the run sheet, in manufacturing order — the same one-row-per-roll
+    expansion as the main table (`_run_sheet_rows`). Each entry is sized for
+    a non-technical floor worker reading at arm's length: a tall colour bar
+    of the roll's threading with large segment labels, its segment widths
+    spelled out below (e.g. "177 in FG    5 in WHI" — no total suffix), and
+    the roll's lot number and length in LF in the entry heading. Wherever the
+    layout changes from the previous roll (a setup/creel change — the row's
+    change cost is > 0, printed as "+N in"), a prominent red "SETUP CHANGE"
+    band separates the two entries. Page breaks keep each entry — and any
+    marker with the entry after it — whole."""
+    rows = _run_sheet_rows(report)
+    if not rows:
         return
 
-    bar_w = min(pdf.epw, 150.0)
-    bar_h = 6.0
-    max_lots = 20  # keep the lots line bounded on very large orders
+    # Sizes chosen for legibility from a distance: the bar is over three times
+    # the table's bar height, and every font is 14 pt or larger.
+    bar_w = pdf.epw
+    bar_h = 16.0        # the table's bars are 5 mm
+    heading_h = 8.0     # 14 pt bold roll heading
+    widths_h = 9.0      # 14 pt bold segment-widths line
+    entry_gap = 6.0     # breathing room after each entry
+    marker_h = 14.0     # the red SETUP CHANGE band
+    entry_h = heading_h + bar_h + 2.0 + widths_h + entry_gap
+    red = (200, 0, 0)
 
     def section_heading():
         pdf.set_x(pdf.l_margin)
-        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_font("Helvetica", "B", 16)
         pdf.set_text_color(20, 20, 20)
-        pdf.cell(0, 7, _latin1("Layout threading breakdown"),
+        pdf.cell(0, 10, _latin1("Layout threading breakdown"),
                  new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Helvetica", "", 8)
+        pdf.set_font("Helvetica", "", 11)
         pdf.set_text_color(90, 90, 90)
         pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(0, 4.5, _latin1(
-            "Exact threading width of each distinct layout, measured front to "
-            "back across the roll width."))
-        pdf.ln(1)
+        pdf.multi_cell(0, 6, _latin1(
+            "Every roll in manufacturing order. Each bar is the roll's "
+            "threading, front to back across the roll width."))
+        pdf.ln(2)
+
+    def draw_setup_change_marker():
+        """A full-width red band: rules either side of "SETUP CHANGE"."""
+        y_mid = pdf.get_y() + marker_h / 2
+        pdf.set_font("Helvetica", "B", 18)
+        pdf.set_text_color(*red)
+        pdf.set_draw_color(*red)
+        pdf.set_line_width(0.8)
+        label = _latin1("SETUP CHANGE")
+        label_w = pdf.get_string_width(label)
+        centre = pdf.l_margin + pdf.epw / 2
+        pdf.line(pdf.l_margin, y_mid, centre - label_w / 2 - 5, y_mid)
+        pdf.line(centre + label_w / 2 + 5, y_mid, pdf.l_margin + pdf.epw, y_mid)
+        pdf.text(centre - label_w / 2, y_mid + 2.2, label)
+        pdf.set_line_width(0.2)
+        pdf.set_y(y_mid + marker_h / 2)
 
     # Start the section on the current page if it fits, else a fresh page.
     pdf.ln(5)
-    if pdf.get_y() + 34 > pdf.h - pdf.b_margin:
+    if pdf.get_y() + 30 + entry_h > pdf.h - pdf.b_margin:
         pdf.add_page()
     section_heading()
 
-    for index, layout in enumerate(layouts, start=1):
-        profile = layout["profile"]
-        total = sum(width for _, width in profile)
-        breakdown = "      ".join(
-            f"{_clean_number(width)} in {code}" for code, width in profile)
-        breakdown = f"{breakdown}      =  {_clean_number(total)} in total"
-        rolls = layout["roll_count"]
-        roll_txt = "1 roll" if rolls == 1 else f"{rolls} rolls"
-        lots = [str(lot) for lot in layout["lots"]]
-        if len(lots) > max_lots:
-            lots_txt = ("Lots: " + ", ".join(lots[:max_lots])
-                        + f"  (+{len(lots) - max_lots} more)")
-        elif lots:
-            lots_txt = "Lots: " + ", ".join(lots)
-        else:
-            lots_txt = ""
+    total_rolls = len(rows)
+    for i, row in enumerate(rows):
+        # A setup/creel change: the change cost to reach this roll is > 0
+        # ("+N in" in the row data; "start" and "0 in" mean no change).
+        setup_change = i > 0 and row["change"].startswith("+")
 
-        # Keep a whole block together: heading + bar + breakdown + lots.
-        block_h = 6 + bar_h + 6 + (5 if lots_txt else 0) + 3
-        if pdf.get_y() + block_h > pdf.h - pdf.b_margin:
+        # Keep the entry — and its marker, if any — together on one page.
+        needed = entry_h + (marker_h if setup_change else 0)
+        if pdf.get_y() + needed > pdf.h - pdf.b_margin:
             pdf.add_page()
             section_heading()
 
+        if setup_change:
+            draw_setup_change_marker()
+
+        length = row["length_lf"]
+        length_txt = (f"{_clean_number(length)} LF"
+                      if isinstance(length, (int, float))
+                      and not isinstance(length, bool) else "")
+        lot = row["navision_lot"]
+        parts = [f"Roll {row['position']} of {total_rolls}"]
+        if lot not in (None, ""):
+            parts.append(f"Lot {lot}")
+        if length_txt:
+            parts.append(length_txt)
         pdf.set_x(pdf.l_margin)
-        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_font("Helvetica", "B", 14)
         pdf.set_text_color(20, 20, 20)
-        pdf.cell(0, 5.5, _latin1(f"Layout {index}   -   {roll_txt}"),
+        pdf.cell(0, heading_h, _latin1("   -   ".join(parts)),
                  new_x="LMARGIN", new_y="NEXT")
 
         y_bar = pdf.get_y()
-        _draw_run_sheet_bar(pdf, pdf.l_margin, y_bar, bar_w, bar_h, profile)
-        pdf.set_y(y_bar + bar_h + 1.2)
+        _draw_run_sheet_bar(pdf, pdf.l_margin, y_bar, bar_w, bar_h,
+                            row["profile"], label_size=13)
+        pdf.set_y(y_bar + bar_h + 2.0)
 
+        widths_txt = "        ".join(
+            f"{_clean_number(width)} in {code}"
+            for code, width in row["profile"])
         pdf.set_x(pdf.l_margin)
-        pdf.set_font("Helvetica", "", 8.5)
+        pdf.set_font("Helvetica", "B", 14)
         pdf.set_text_color(20, 20, 20)
-        pdf.multi_cell(0, 5, _latin1(breakdown))
-
-        if lots_txt:
-            pdf.set_x(pdf.l_margin)
-            pdf.set_font("Helvetica", "", 7.5)
-            pdf.set_text_color(110, 110, 110)
-            pdf.multi_cell(0, 4, _latin1(lots_txt))
-        pdf.ln(2.5)
+        pdf.cell(0, widths_h, _latin1(widths_txt),
+                 new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(entry_gap)
 
 
 # --------------------------------------------------------------------------

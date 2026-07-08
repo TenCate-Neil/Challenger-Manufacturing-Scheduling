@@ -138,31 +138,6 @@ def test_run_sheet_rows_expand_qty_and_carry_fields():
     assert all(isinstance(r["change"], str) for r in rows)
 
 
-def test_distinct_layouts_group_count_and_lots():
-    if not _HAVE_DEPS:
-        return  # skip: dependency-free environment
-    # The bottom breakdown groups by distinct layout, sums the physical rolls
-    # that use each, and lists the lots — so the exact threading widths can be
-    # spelled out per layout.
-    rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, panels="1"),
-             _roll("L2", ("FG", 182), sort=2, panels="2"),
-             _roll("L3", ("FG", 177), ("WHI", 5), sort=3, panels="3")]
-    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
-    layouts = app._distinct_layouts(report)
-
-    by_profile = {tuple(l["profile"]): l for l in layouts}
-    # L1 (qty=2) and L2 share the all-FG layout -> three physical rolls, two lots.
-    full_fg = by_profile[(("FG", 182),)]
-    assert full_fg["roll_count"] == 3
-    assert set(full_fg["lots"]) == {"L1", "L2"}
-    # The FG/WHI layout carries its exact segment widths for the breakdown text.
-    fg_whi = by_profile[(("FG", 177), ("WHI", 5))]
-    assert fg_whi["roll_count"] == 1
-    assert fg_whi["lots"] == ["L3"]
-    # There are exactly two distinct layouts in this order.
-    assert len(layouts) == 2
-
-
 def test_build_run_sheet_pdf_bytes():
     if not _HAVE_DEPS:
         return  # skip: dependency-free environment
@@ -221,6 +196,90 @@ def test_run_sheet_pdf_shows_per_roll_purchase_orders():
     assert b"PO #" in content
     assert b"PO-1001" in content
     assert b"PO-2002" in content
+
+
+def test_breakdown_one_entry_per_physical_roll():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    try:
+        import fpdf  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return  # skip: fpdf2 unavailable
+    # The bottom breakdown is per physical roll, not per distinct layout: a
+    # qty=2 entry yields two breakdown entries (both carrying its lot), so
+    # rolls that share a layout but differ in length each get their own block.
+    rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, lf=120),
+             _roll("L2", ("FG", 177), ("WHI", 5), sort=2, lf=95)]
+    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+    content = _pdf_content(bytes(app.build_run_sheet_pdf("SAMPLE.xlsx", report)))
+    # Three physical rolls -> three "Roll N of 3" entry headings.
+    for n in (1, 2, 3):
+        assert content.count(f"Roll {n} of 3".encode("latin-1")) == 1, n
+    # The "Lot <x>" heading form is breakdown-specific (the table prints the
+    # bare lot), so the qty=2 lot appears exactly twice, the qty=1 lot once.
+    assert content.count(b"Lot L1") == 2
+    assert content.count(b"Lot L2") == 1
+
+
+def test_breakdown_shows_lengths_and_no_total_suffix():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    try:
+        import fpdf  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return  # skip: fpdf2 unavailable
+    # Each breakdown entry states the roll's length in LF, and the segment
+    # widths are spelled out without any "= 182 in total" suffix anywhere.
+    rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, lf=120),
+             _roll("L2", ("FG", 177), ("WHI", 5), sort=2, lf=95)]
+    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+    content = _pdf_content(bytes(app.build_run_sheet_pdf("SAMPLE.xlsx", report)))
+    # The "<n> LF" form is breakdown-specific (the table's length column
+    # prints the bare number), so each length appears once per physical roll.
+    assert content.count(b"120 LF") == 2
+    assert content.count(b"95 LF") == 1
+    # The old grouped section's total suffix is gone from the whole PDF.
+    assert b"in total" not in content
+
+
+def test_breakdown_setup_change_marker_between_differing_layouts():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    try:
+        import fpdf  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return  # skip: fpdf2 unavailable
+    # Two distinct layouts -> the optimised run has exactly one costly
+    # transition, so exactly one red SETUP CHANGE band separates the entries
+    # (not one before every roll, and none between the identical-layout pair).
+    rolls = [_roll("L1", ("FG", 182), sort=1, qty=2),
+             _roll("L2", ("FG", 177), ("WHI", 5), sort=2)]
+    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+    content = _pdf_content(bytes(app.build_run_sheet_pdf("SAMPLE.xlsx", report)))
+    assert content.count(b"SETUP CHANGE") == 1
+    # The marker is drawn in red: the red non-stroking colour operator
+    # (200, 0, 0 -> "0.7843 0 0 rg") is set just before its text.
+    idx = content.index(b"SETUP CHANGE")
+    assert b"0.7843 0 0 rg" in content[max(0, idx - 400):idx]
+
+
+def test_breakdown_no_setup_change_when_layouts_identical():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    try:
+        import fpdf  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return  # skip: fpdf2 unavailable
+    # Every roll shares one layout -> no costly transition anywhere, so the
+    # breakdown shows the rolls back to back with no SETUP CHANGE band.
+    rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, lf=120),
+             _roll("L2", ("FG", 182), sort=2, lf=80)]
+    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+    content = _pdf_content(bytes(app.build_run_sheet_pdf("SAMPLE.xlsx", report)))
+    assert b"SETUP CHANGE" not in content
+    # All three physical rolls still get their own entry.
+    for n in (1, 2, 3):
+        assert content.count(f"Roll {n} of 3".encode("latin-1")) == 1, n
 
 
 def _extraction(name, rolls, po=None):
