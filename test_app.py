@@ -115,7 +115,10 @@ def test_run_sheet_rows_expand_qty_and_carry_fields():
     # and a parsed layout profile.
     rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, panels="P1-P2", lf=120),
              _roll("L2", ("FG", 100), ("WHI", 82), sort=2, panels="P3")]
-    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+    report = evaluate(rolls, extraction={
+        "source_file": "SAMPLE.xlsx",
+        "general_information": {"purchase_order_number": "PO-7001"},
+    })
     rows = app._run_sheet_rows(report)
 
     # qty=2 + qty=1 -> three physical rolls, numbered 1..3 (order is optimised,
@@ -123,6 +126,8 @@ def test_run_sheet_rows_expand_qty_and_carry_fields():
     assert [r["position"] for r in rows] == [1, 2, 3]
     lots = [r["navision_lot"] for r in rows]
     assert lots.count("L1") == 2 and lots.count("L2") == 1
+    # Single-file path: every row carries the extraction's PO.
+    assert all(r["purchase_order_number"] == "PO-7001" for r in rows)
     # The L1 rows carry its panels, length, and parsed layout profile.
     l1_rows = [r for r in rows if r["navision_lot"] == "L1"]
     assert all(r["panel_numbers"] == "P1-P2" for r in l1_rows)
@@ -175,7 +180,50 @@ def test_build_run_sheet_pdf_bytes():
     assert len(pdf) > 1000
 
 
-def _extraction(name, rolls):
+def _pdf_content(pdf_bytes):
+    """The PDF's stream contents with any zlib compression undone. The run
+    sheet uses only the built-in core fonts, so its text appears as literal
+    latin-1 strings in the content streams — enough to assert on without a
+    PDF-parsing dependency."""
+    import re
+    import zlib
+
+    out = bytearray()
+    for match in re.finditer(rb"stream\r?\n(.*?)endstream", pdf_bytes,
+                             re.DOTALL):
+        data = match.group(1)
+        try:
+            data = zlib.decompress(data)
+        except zlib.error:
+            pass  # an uncompressed stream (or an image) — use as-is
+        out.extend(data)
+    return bytes(out)
+
+
+def test_run_sheet_pdf_shows_per_roll_purchase_orders():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    try:
+        import fpdf  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return  # skip: fpdf2 unavailable
+    # A combined run mixes files with different POs, so the run sheet needs a
+    # per-roll "PO #" column: both PO values must land in the PDF text, not
+    # just one header-level PO.
+    ext_a = _extraction("A.xlsx", [_roll("A1", ("FG", 182), sort=1),
+                                   _roll("A2", ("FG", 177), ("WHI", 5), sort=2)],
+                        po="PO-1001")
+    ext_b = _extraction("B.xlsx", [_roll("B1", ("FG", 100), ("WHI", 82), sort=1)],
+                        po="PO-2002")
+    _, report = app.evaluate_combined([ext_a, ext_b])
+    pdf = app.build_run_sheet_pdf("combined", report)
+    content = _pdf_content(bytes(pdf))
+    assert b"PO #" in content
+    assert b"PO-1001" in content
+    assert b"PO-2002" in content
+
+
+def _extraction(name, rolls, po=None):
     # A synthetic extraction dict shaped like `extract_workbook`'s output,
     # with a correct MFG summary derived from the rolls (roll_qty, LF and SF
     # summed the same way the evaluator's cross-check sums the sequence).
@@ -183,6 +231,7 @@ def _extraction(name, rolls):
         "source_file": name,
         "rolls": rolls,
         "roll_count": len(rolls),
+        "general_information": {"purchase_order_number": po},
         "mfg_summary": {
             "mfg_rolls": sum(r["roll_qty"] for r in rolls),
             "mfg_lf": sum(r["mfg_roll_length_lf"] for r in rolls),

@@ -256,7 +256,8 @@ def evaluate(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
 
     `rolls` is the list of roll dicts (Phase 1's `load_rolls` output).
     `extraction` is the optional full extraction dict, used only to echo the
-    source file and cross-check totals against the extractor's MFG summary.
+    source file and purchase order number and to cross-check totals against
+    the extractor's MFG summary.
 
     The report contains the optimised manufacturing sequence, the achieved
     cost, the conservation result, the solution-quality analysis, and the
@@ -291,8 +292,12 @@ def evaluate(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
     breakdown = transition_breakdown(sequence)
 
     # Optional cross-check against the extractor's own MFG summary totals.
+    extraction_po = None
     if isinstance(extraction, dict):
         _cross_check_mfg_summary(extraction, sequence, warnings)
+        info = extraction.get("general_information")
+        if isinstance(info, dict):
+            extraction_po = info.get("purchase_order_number")
 
     return {
         "source_file": extraction.get("source_file")
@@ -317,7 +322,7 @@ def evaluate(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
             }
             for g in groups
         ],
-        "manufacturing_sequence": _sequence_view(sequence),
+        "manufacturing_sequence": _sequence_view(sequence, extraction_po),
         "distance_matrix": matrix,
         "warnings": warnings,
     }
@@ -350,11 +355,17 @@ def _cross_check_mfg_summary(extraction, sequence, warnings):
                 f"{stated}; reporting the summed roll rows.")
 
 
-def _sequence_view(sequence):
+def _sequence_view(sequence, extraction_po=None):
     """A compact, JSON-friendly view of the optimised sequence: one entry per
-    roll in manufacturing order, with its identity, panel numbers, quantity,
-    size, layout, and the setup change cost incurred to switch to it from the
-    previous roll (0 for the first roll — a fresh start, plan assumption 7)."""
+    roll in manufacturing order, with its identity, purchase order number,
+    panel numbers, quantity, size, layout, and the setup change cost incurred
+    to switch to it from the previous roll (0 for the first roll — a fresh
+    start, plan assumption 7).
+
+    The purchase order number is per roll because a combined order mixes
+    files with different POs: a roll's own `purchase_order_number` tag (set
+    by `join_orders`) wins, falling back to `extraction_po` — the single
+    file's PO — and to None when neither is known."""
     from roll_sequencing import profile_cost
 
     view = []
@@ -362,9 +373,11 @@ def _sequence_view(sequence):
     for position, roll in enumerate(sequence, start=1):
         profile = roll_profile(roll)
         change = 0 if prev_profile is None else profile_cost(prev_profile, profile)
+        po = roll.get("purchase_order_number")
         view.append({
             "position": position,
             "navision_lot": roll.get("navision_lot"),
+            "purchase_order_number": po if po is not None else extraction_po,
             "panel_numbers": roll.get("panel_numbers"),
             "sort": roll.get("sort"),
             "roll_type": roll.get("roll_type"),

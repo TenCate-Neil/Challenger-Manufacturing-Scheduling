@@ -213,6 +213,26 @@ def test_evaluate_achieved_cost_matches_scored_sequence():
     assert report["conservation"]["passed"]
 
 
+def test_sequence_view_carries_extraction_purchase_order():
+    # Single-file path: the rolls carry no PO tag of their own, so every
+    # sequence entry echoes the extraction's PO for the run sheet to print.
+    extraction = {
+        "source_file": "S.xlsx",
+        "general_information": {"purchase_order_number": "PO-7001"},
+    }
+    report = ev.evaluate(_sample_rolls(), extraction=extraction)
+    view = report["manufacturing_sequence"]
+    assert view, "expected a non-empty sequence view"
+    assert all(e["purchase_order_number"] == "PO-7001" for e in view)
+
+
+def test_sequence_view_purchase_order_none_when_absent():
+    # Old inputs with no PO anywhere must not crash; the entry carries None.
+    report = ev.evaluate(_sample_rolls())
+    assert all(e["purchase_order_number"] is None
+               for e in report["manufacturing_sequence"])
+
+
 def test_evaluate_cross_checks_mfg_summary():
     rolls = _sample_rolls()  # linear feet total 400, square feet 6000
     extraction = {
@@ -227,10 +247,10 @@ def test_evaluate_cross_checks_mfg_summary():
 
 
 # --- combined orders (join_orders -> evaluate) ------------------------------
-def _extraction(name, rolls):
+def _extraction(name, rolls, po=None):
     """Extraction-result dict whose MFG summary matches its rolls exactly, so
     the cross-check has a correct second source to compare against."""
-    return {
+    out = {
         "source_file": name,
         "rolls": rolls,
         "mfg_summary": {
@@ -239,6 +259,9 @@ def _extraction(name, rolls):
             "mfg_sf": sum(r["total_mfg_sf"] for r in rolls),
         },
     }
+    if po is not None:
+        out["general_information"] = {"purchase_order_number": po}
+    return out
 
 
 def test_combined_orders_conserve_and_cross_check_cleanly():
@@ -256,6 +279,23 @@ def test_combined_orders_conserve_and_cross_check_cleanly():
     assert "A.xlsx" in report["source_file"]
     assert "B.xlsx" in report["source_file"]
     assert not any("MFG summary" in w for w in report["warnings"])
+
+
+def test_combined_sequence_view_carries_per_roll_purchase_orders():
+    # Combined mode mixes files with different POs, so the PO must be per
+    # entry — each roll shows its own file's PO, whatever order the optimiser
+    # chose. The joined dict itself has no general_information; the per-roll
+    # tags from join_orders carry the information.
+    ext_a = _extraction("A.xlsx", [_roll("A1", ("FG", 182), sort=1),
+                                   _roll("A2", ("FG", 177), ("WHI", 5), sort=2)],
+                        po="PO-1001")
+    ext_b = _extraction("B.xlsx", [_roll("B1", ("WHI", 182), sort=1)],
+                        po="PO-2002")
+    combined = join_orders([ext_a, ext_b])
+    report = ev.evaluate(combined["rolls"], extraction=combined)
+    pos = {e["navision_lot"]: e["purchase_order_number"]
+           for e in report["manufacturing_sequence"]}
+    assert pos == {"A1": "PO-1001", "A2": "PO-1001", "B1": "PO-2002"}
 
 
 def test_combined_cross_check_catches_wrong_file_total():

@@ -357,9 +357,11 @@ def _run_sheet_rows(report):
     """The run sheet's body rows as plain data, in manufacturing order and one
     row per physical roll: each sequence entry's `roll_qty` is expanded so a
     two-roll entry becomes two rows, matching the "Full manufacturing order"
-    view. Each row carries the position, Navision lot number, panel numbers,
-    length (LF), the parsed layout profile, and the setup change cost incurred
-    to switch to it (a human string; "start" for the first roll).
+    view. Each row carries the position, purchase order number, Navision lot
+    number, panel numbers, length (LF), the parsed layout profile, and the
+    setup change cost incurred to switch to it (a human string; "start" for
+    the first roll). The PO is per row because a combined order mixes files
+    with different POs; reports without one carry None, printed as blank.
 
     No Streamlit and no PDF library — the shared, testable core of the run
     sheet."""
@@ -369,6 +371,7 @@ def _run_sheet_rows(report):
     for entry in report.get("manufacturing_sequence", []):
         profile = _profile_of(entry.get("layout_signature"))
         lot = entry.get("navision_lot")
+        po = entry.get("purchase_order_number")
         panels = entry.get("panel_numbers")
         length = entry.get("mfg_roll_length_lf")
         for _ in range(_reps_of(entry.get("roll_qty"))):
@@ -381,6 +384,7 @@ def _run_sheet_rows(report):
             rows.append({
                 "position": position,
                 "navision_lot": lot,
+                "purchase_order_number": po,
                 "panel_numbers": panels,
                 "length_lf": length,
                 "profile": profile,
@@ -434,10 +438,12 @@ def build_run_sheet_pdf(filename, report):
     installed; the caller degrades gracefully in that case.
 
     Rolls are listed in manufacturing order, one row per physical roll, with the
-    position, Navision lot number, panel numbers, length (LF), a colour bar of
-    the layout, and the per-step setup change cost. A header carries the source
-    file, total setup cost, and the roll/layout counts, and a section at the
-    bottom gives the exact threading width of each distinct layout."""
+    position, purchase order number (per roll, since a combined order mixes
+    files with different POs), Navision lot number, panel numbers, length (LF),
+    a colour bar of the layout, and the per-step setup change cost. A header
+    carries the source file, total setup cost, and the roll/layout counts, and a
+    section at the bottom gives the exact threading width of each distinct
+    layout."""
     from fpdf import FPDF
 
     rows = _run_sheet_rows(report)
@@ -451,11 +457,13 @@ def build_run_sheet_pdf(filename, report):
     pdf.set_auto_page_break(False)
     pdf.add_page()
 
-    # Column widths (mm), summing to the effective page width.
+    # Column widths (mm), summing to the effective page width. The layout bar
+    # takes whatever the fixed columns leave over.
     epw = pdf.epw
-    w_pos, w_lot, w_panels, w_len, w_chg = 12, 40, 34, 24, 28
-    w_bar = epw - (w_pos + w_lot + w_panels + w_len + w_chg)
-    columns = [("#", w_pos, "R"), ("Navision lot #", w_lot, "L"),
+    w_pos, w_po, w_lot, w_panels, w_len, w_chg = 12, 26, 34, 30, 24, 28
+    w_bar = epw - (w_pos + w_po + w_lot + w_panels + w_len + w_chg)
+    columns = [("#", w_pos, "R"), ("PO #", w_po, "L"),
+               ("Navision lot #", w_lot, "L"),
                ("Panel #s", w_panels, "L"), ("Length (LF)", w_len, "R"),
                ("Layout", w_bar, "L"), ("Setup change", w_chg, "R")]
     row_h, bar_h = 8.5, 5.0
@@ -510,6 +518,10 @@ def build_run_sheet_pdf(filename, report):
                       if isinstance(length, (int, float))
                       and not isinstance(length, bool) else "")
         pdf.cell(w_pos, row_h, _latin1(row["position"]), border=1, align="R")
+        po = row["purchase_order_number"]
+        pdf.cell(w_po, row_h,
+                 _latin1(po) if po not in (None, "") else "",
+                 border=1, align="L")
         pdf.cell(w_lot, row_h, _latin1(row["navision_lot"] or ""),
                  border=1, align="L")
         panels = row["panel_numbers"]

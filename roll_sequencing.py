@@ -242,7 +242,12 @@ def join_orders(extractions):
     `extractions` is a list of extraction result dicts (or bare roll lists).
     The rolls are concatenated in the given order, and each roll is tagged —
     on a copy; the inputs are not mutated — with the `source_file` it came
-    from, so the combined sequence stays traceable to its workbook.
+    from, so the combined sequence stays traceable to its workbook, and with
+    its file's `purchase_order_number` (from `general_information`), so a
+    combined run sheet can show which PO each roll belongs to. A roll that
+    already carries a `purchase_order_number` tag (e.g. from a previous join)
+    keeps it when its extraction states none; where neither is present the
+    tag is None.
 
     No identity reconciliation is needed: Phase 2's `collapse_layouts` groups
     on the canonical threading profile, so layouts shared between files
@@ -273,16 +278,24 @@ def join_orders(extractions):
     summaries = []
 
     for index, extracted in enumerate(extractions):
+        po = None
         if isinstance(extracted, dict):
             name = str(extracted.get("source_file") or f"order {index + 1}")
             summaries.append(extracted.get("mfg_summary"))
             warnings.extend(f"{name}: {w}" for w in extracted.get("warnings", []))
+            info = extracted.get("general_information")
+            if isinstance(info, dict):
+                po = info.get("purchase_order_number")
         else:
             name = f"order {index + 1}"
             summaries.append(None)
         names.append(name)
-        rolls.extend(dict(roll, source_file=name, layout_group=None)
-                     for roll in load_rolls(extracted))
+        rolls.extend(
+            dict(roll, source_file=name, layout_group=None,
+                 purchase_order_number=(
+                     po if po is not None
+                     else roll.get("purchase_order_number")))
+            for roll in load_rolls(extracted))
 
     summary = {}
     for field in _JOINED_SUMMARY_FIELDS:
