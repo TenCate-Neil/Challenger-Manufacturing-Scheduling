@@ -268,13 +268,16 @@ report and add no sequencing logic.
 Alongside the JSON download there is a **Download run sheet (PDF)** button — a
 printable sheet for the manufacturing floor. It lists the rolls in manufacturing
 order, one row per physical roll (`roll_qty` expanded, exactly as the full
-manufacturing order view), and shows the position, Navision lot number, panel
-numbers, length (LF), the same layout colour bar, and the per-step setup change
-cost. A header carries the source file, total setup cost, and roll/layout
-counts, and a **Layout threading breakdown** section at the bottom spells out the
-exact threading width of each distinct layout (e.g. `177 in FG   5 in WHI   =
-182 in total`) with the lots that use it, so the floor has the precise tufting
-spec and not only the visual bar. It is rendered with
+manufacturing order view), and shows the position, purchase order number,
+Navision lot number, panel numbers, length (LF), the same layout colour bar,
+and the per-step setup change cost. A header carries the source file, total
+setup cost, and roll/layout counts, and a **Layout threading breakdown**
+section at the bottom is written for the manufacturing floor: one large-print
+entry per physical roll in manufacturing order, each with a tall colour bar of
+its threading, the segment widths spelled out (e.g. `177 in FG   5 in WHI`),
+the roll's length in LF and its lot number. Wherever consecutive rolls differ
+in layout the section inserts a red **SETUP CHANGE** band between them, so
+creel changes are impossible to miss. It is rendered with
 [fpdf2](https://py-pdf.github.io/fpdf2/), which is
 pure Python — a plain `pip install`, with no system libraries or browser to set
 up — and the colour bars are drawn from the same colour mapping as the on-screen
@@ -294,7 +297,7 @@ python test_app.py                 # standalone runner
 pytest test_app.py                 # if pytest is installed
 ```
 
-## Combined mode and splitting into k schedules
+## Combined mode
 
 Several orders can be joined and sequenced as one combined run.
 `join_orders(extractions)` (in `roll_sequencing.py`) concatenates the rolls of
@@ -315,22 +318,9 @@ python sequencer.py A.json B.json --combine       # one combined sequence
 
 In the app, uploading two or more workbooks shows a toggle: **Separate
 schedules** (each workbook sequenced on its own, the default) or **Combined**
-(all rolls joined into one order and sequenced together).
-
-A combined sequence can then be **split into k manufacturing schedules** by
-cutting its k−1 most expensive transitions — the solved path already clusters
-similar layouts, so the big changeovers are the natural boundaries. Each
-schedule restarts from a fresh machine state (cost 0 at its start), so the
-total setup cost drops by exactly the sum of the removed transitions. Cutting
-the largest edges is the optimal way to partition that fixed ordering into k
-open paths; it is not a proven global optimum over all ways of assigning rolls
-to k schedules, since the ordering was solved before the cuts. Alongside the
-"number of schedules (k)" input there is a threshold option (split wherever a
-changeover exceeds X inches) and an elbow/guidance view — for each k, the
-total cost and the marginal saving one more cut would add — so the choice of k
-can be made from the data. Each schedule renders as its own report section
-with its own PDF run sheet; the CLI equivalents are `--split-k` and
-`--split-threshold` on `evaluate.py`.
+(all rolls joined into one order and sequenced together). A combined order is
+one manufacturing schedule: it renders as a single report with its own PDF run
+sheet, exactly like a single-file order.
 
 ### How far the exact solver goes
 

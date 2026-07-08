@@ -33,7 +33,6 @@ from evaluate import (
     DEFAULT_EXACT_ORACLE_MAX_LAYOUTS,
     evaluate,
     report_json,
-    split_report,
 )
 from extract_turf_layout import TemplateMismatch, extract_workbook
 from roll_sequencing import (
@@ -42,7 +41,6 @@ from roll_sequencing import (
     parse_signature,
     profile_cost,
 )
-from sequencer import split_guidance
 
 
 # --------------------------------------------------------------------------
@@ -359,9 +357,11 @@ def _run_sheet_rows(report):
     """The run sheet's body rows as plain data, in manufacturing order and one
     row per physical roll: each sequence entry's `roll_qty` is expanded so a
     two-roll entry becomes two rows, matching the "Full manufacturing order"
-    view. Each row carries the position, Navision lot number, panel numbers,
-    length (LF), the parsed layout profile, and the setup change cost incurred
-    to switch to it (a human string; "start" for the first roll).
+    view. Each row carries the position, purchase order number, Navision lot
+    number, panel numbers, length (LF), the parsed layout profile, and the
+    setup change cost incurred to switch to it (a human string; "start" for
+    the first roll). The PO is per row because a combined order mixes files
+    with different POs; reports without one carry None, printed as blank.
 
     No Streamlit and no PDF library — the shared, testable core of the run
     sheet."""
@@ -371,6 +371,7 @@ def _run_sheet_rows(report):
     for entry in report.get("manufacturing_sequence", []):
         profile = _profile_of(entry.get("layout_signature"))
         lot = entry.get("navision_lot")
+        po = entry.get("purchase_order_number")
         panels = entry.get("panel_numbers")
         length = entry.get("mfg_roll_length_lf")
         for _ in range(_reps_of(entry.get("roll_qty"))):
@@ -383,6 +384,7 @@ def _run_sheet_rows(report):
             rows.append({
                 "position": position,
                 "navision_lot": lot,
+                "purchase_order_number": po,
                 "panel_numbers": panels,
                 "length_lf": length,
                 "profile": profile,
@@ -398,11 +400,13 @@ def _latin1(value):
     return str(value).encode("latin-1", "replace").decode("latin-1")
 
 
-def _draw_run_sheet_bar(pdf, x, y, width, height, profile):
+def _draw_run_sheet_bar(pdf, x, y, width, height, profile, label_size=6.5):
     """Draw a roll's threading profile as a horizontal segmented colour bar at
     (x, y), `width` x `height` mm — the PDF twin of `_bar_html`. Segment widths
     are proportional to inches; codes use the same colours as on screen, with a
-    short label centred on any segment wide enough to hold it."""
+    short label centred on any segment wide enough to hold it. `label_size` is
+    the label font size in points — the tall bars of the per-roll threading
+    breakdown pass a much larger size than the table's compact bars."""
     total = sum(seg_w for _, seg_w in profile)
     if total <= 0:
         pdf.set_draw_color(170, 170, 170)
@@ -420,12 +424,14 @@ def _draw_run_sheet_bar(pdf, x, y, width, height, profile):
         pdf.rect(cursor, y, seg, height, style="DF")
 
         label = _latin1(code)
-        pdf.set_font("Helvetica", "B", 6.5)
+        pdf.set_font("Helvetica", "B", label_size)
         if seg >= pdf.get_string_width(label) + 1.5:
             tr, tg, tb = _hex_to_rgb(_text_on(_color_for_code(code)))
             pdf.set_text_color(tr, tg, tb)
+            # Baseline sits just below the vertical centre; the offset scales
+            # with the font size (0.17 mm/pt centres both 6.5 pt and 13 pt).
             pdf.text(cursor + seg / 2 - pdf.get_string_width(label) / 2,
-                     y + height / 2 + 1.1, label)
+                     y + height / 2 + label_size * 0.17, label)
         cursor += seg
 
 
@@ -436,10 +442,13 @@ def build_run_sheet_pdf(filename, report):
     installed; the caller degrades gracefully in that case.
 
     Rolls are listed in manufacturing order, one row per physical roll, with the
-    position, Navision lot number, panel numbers, length (LF), a colour bar of
-    the layout, and the per-step setup change cost. A header carries the source
-    file, total setup cost, and the roll/layout counts, and a section at the
-    bottom gives the exact threading width of each distinct layout."""
+    position, purchase order number (per roll, since a combined order mixes
+    files with different POs), Navision lot number, panel numbers, length (LF),
+    a colour bar of the layout, and the per-step setup change cost. A header
+    carries the source file, total setup cost, and the roll/layout counts, and a
+    large-print section at the bottom gives the exact threading width of every
+    physical roll in manufacturing order, with a red SETUP CHANGE band wherever
+    the layout changes."""
     from fpdf import FPDF
 
     rows = _run_sheet_rows(report)
@@ -453,11 +462,13 @@ def build_run_sheet_pdf(filename, report):
     pdf.set_auto_page_break(False)
     pdf.add_page()
 
-    # Column widths (mm), summing to the effective page width.
+    # Column widths (mm), summing to the effective page width. The layout bar
+    # takes whatever the fixed columns leave over.
     epw = pdf.epw
-    w_pos, w_lot, w_panels, w_len, w_chg = 12, 40, 34, 24, 28
-    w_bar = epw - (w_pos + w_lot + w_panels + w_len + w_chg)
-    columns = [("#", w_pos, "R"), ("Navision lot #", w_lot, "L"),
+    w_pos, w_po, w_lot, w_panels, w_len, w_chg = 12, 26, 34, 30, 24, 28
+    w_bar = epw - (w_pos + w_po + w_lot + w_panels + w_len + w_chg)
+    columns = [("#", w_pos, "R"), ("PO #", w_po, "L"),
+               ("Navision lot #", w_lot, "L"),
                ("Panel #s", w_panels, "L"), ("Length (LF)", w_len, "R"),
                ("Layout", w_bar, "L"), ("Setup change", w_chg, "R")]
     row_h, bar_h = 8.5, 5.0
@@ -512,6 +523,10 @@ def build_run_sheet_pdf(filename, report):
                       if isinstance(length, (int, float))
                       and not isinstance(length, bool) else "")
         pdf.cell(w_pos, row_h, _latin1(row["position"]), border=1, align="R")
+        po = row["purchase_order_number"]
+        pdf.cell(w_po, row_h,
+                 _latin1(po) if po not in (None, "") else "",
+                 border=1, align="L")
         pdf.cell(w_lot, row_h, _latin1(row["navision_lot"] or ""),
                  border=1, align="L")
         panels = row["panel_numbers"]
@@ -533,7 +548,7 @@ def build_run_sheet_pdf(filename, report):
         pdf.cell(w_chg, row_h, _latin1(row["change"]), border=1, align="R")
         pdf.ln(row_h)
 
-    # Exact per-layout threading widths, at the bottom.
+    # Large-print per-roll threading widths, at the bottom.
     _draw_layout_breakdowns(pdf, report)
 
     return bytes(pdf.output())
@@ -576,106 +591,114 @@ def _profile_signature(profile):
     return "|".join(f"{width}{code}" for code, width in profile)
 
 
-def _distinct_layouts(report):
-    """The distinct layouts in the order, in first-appearance (manufacturing)
-    order. Each entry carries the parsed profile, how many physical rolls use
-    it (roll_qty summed), and the Navision lots that use it — the data behind
-    the exact per-layout threading breakdown."""
-    order = []
-    seen = {}
-    for entry in report.get("manufacturing_sequence", []):
-        profile = _profile_of(entry.get("layout_signature"))
-        key = _profile_signature(profile)
-        info = seen.get(key)
-        if info is None:
-            info = {"profile": profile, "roll_count": 0, "lots": []}
-            seen[key] = info
-            order.append(key)
-        info["roll_count"] += _reps_of(entry.get("roll_qty"))
-        lot = entry.get("navision_lot")
-        if lot is not None and lot not in info["lots"]:
-            info["lots"].append(lot)
-    return [seen[key] for key in order]
-
-
 def _draw_layout_breakdowns(pdf, report):
-    """Draw the exact threading breakdown of each distinct layout at the bottom
-    of the run sheet: the colour bar plus its segment widths spelled out (e.g.
-    "177 in FG    5 in WHI    = 182 in total"), so the floor has the precise
-    tufting spec and not only the visual bar. One block per distinct layout, in
-    manufacturing order, with the lots that use it."""
-    layouts = _distinct_layouts(report)
-    if not layouts:
+    """Draw the threading breakdown of every physical roll at the bottom of
+    the run sheet, in manufacturing order — the same one-row-per-roll
+    expansion as the main table (`_run_sheet_rows`). Each entry is sized for
+    a non-technical floor worker reading at arm's length: a tall colour bar
+    of the roll's threading with large segment labels, its segment widths
+    spelled out below (e.g. "177 in FG    5 in WHI" — no total suffix), and
+    the roll's lot number and length in LF in the entry heading. Wherever the
+    layout changes from the previous roll (a setup/creel change — the row's
+    change cost is > 0, printed as "+N in"), a prominent red "SETUP CHANGE"
+    band separates the two entries. Page breaks keep each entry — and any
+    marker with the entry after it — whole."""
+    rows = _run_sheet_rows(report)
+    if not rows:
         return
 
-    bar_w = min(pdf.epw, 150.0)
-    bar_h = 6.0
-    max_lots = 20  # keep the lots line bounded on very large orders
+    # Sizes chosen for legibility from a distance: the bar is over three times
+    # the table's bar height, and every font is 14 pt or larger.
+    bar_w = pdf.epw
+    bar_h = 16.0        # the table's bars are 5 mm
+    heading_h = 8.0     # 14 pt bold roll heading
+    widths_h = 9.0      # 14 pt bold segment-widths line
+    entry_gap = 6.0     # breathing room after each entry
+    marker_h = 14.0     # the red SETUP CHANGE band
+    entry_h = heading_h + bar_h + 2.0 + widths_h + entry_gap
+    red = (200, 0, 0)
 
     def section_heading():
         pdf.set_x(pdf.l_margin)
-        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_font("Helvetica", "B", 16)
         pdf.set_text_color(20, 20, 20)
-        pdf.cell(0, 7, _latin1("Layout threading breakdown"),
+        pdf.cell(0, 10, _latin1("Layout threading breakdown"),
                  new_x="LMARGIN", new_y="NEXT")
-        pdf.set_font("Helvetica", "", 8)
+        pdf.set_font("Helvetica", "", 11)
         pdf.set_text_color(90, 90, 90)
         pdf.set_x(pdf.l_margin)
-        pdf.multi_cell(0, 4.5, _latin1(
-            "Exact threading width of each distinct layout, measured front to "
-            "back across the roll width."))
-        pdf.ln(1)
+        pdf.multi_cell(0, 6, _latin1(
+            "Every roll in manufacturing order. Each bar is the roll's "
+            "threading, front to back across the roll width."))
+        pdf.ln(2)
+
+    def draw_setup_change_marker():
+        """A full-width red band: rules either side of "SETUP CHANGE"."""
+        y_mid = pdf.get_y() + marker_h / 2
+        pdf.set_font("Helvetica", "B", 18)
+        pdf.set_text_color(*red)
+        pdf.set_draw_color(*red)
+        pdf.set_line_width(0.8)
+        label = _latin1("SETUP CHANGE")
+        label_w = pdf.get_string_width(label)
+        centre = pdf.l_margin + pdf.epw / 2
+        pdf.line(pdf.l_margin, y_mid, centre - label_w / 2 - 5, y_mid)
+        pdf.line(centre + label_w / 2 + 5, y_mid, pdf.l_margin + pdf.epw, y_mid)
+        pdf.text(centre - label_w / 2, y_mid + 2.2, label)
+        pdf.set_line_width(0.2)
+        pdf.set_y(y_mid + marker_h / 2)
 
     # Start the section on the current page if it fits, else a fresh page.
     pdf.ln(5)
-    if pdf.get_y() + 34 > pdf.h - pdf.b_margin:
+    if pdf.get_y() + 30 + entry_h > pdf.h - pdf.b_margin:
         pdf.add_page()
     section_heading()
 
-    for index, layout in enumerate(layouts, start=1):
-        profile = layout["profile"]
-        total = sum(width for _, width in profile)
-        breakdown = "      ".join(
-            f"{_clean_number(width)} in {code}" for code, width in profile)
-        breakdown = f"{breakdown}      =  {_clean_number(total)} in total"
-        rolls = layout["roll_count"]
-        roll_txt = "1 roll" if rolls == 1 else f"{rolls} rolls"
-        lots = [str(lot) for lot in layout["lots"]]
-        if len(lots) > max_lots:
-            lots_txt = ("Lots: " + ", ".join(lots[:max_lots])
-                        + f"  (+{len(lots) - max_lots} more)")
-        elif lots:
-            lots_txt = "Lots: " + ", ".join(lots)
-        else:
-            lots_txt = ""
+    total_rolls = len(rows)
+    for i, row in enumerate(rows):
+        # A setup/creel change: the change cost to reach this roll is > 0
+        # ("+N in" in the row data; "start" and "0 in" mean no change).
+        setup_change = i > 0 and row["change"].startswith("+")
 
-        # Keep a whole block together: heading + bar + breakdown + lots.
-        block_h = 6 + bar_h + 6 + (5 if lots_txt else 0) + 3
-        if pdf.get_y() + block_h > pdf.h - pdf.b_margin:
+        # Keep the entry — and its marker, if any — together on one page.
+        needed = entry_h + (marker_h if setup_change else 0)
+        if pdf.get_y() + needed > pdf.h - pdf.b_margin:
             pdf.add_page()
             section_heading()
 
+        if setup_change:
+            draw_setup_change_marker()
+
+        length = row["length_lf"]
+        length_txt = (f"{_clean_number(length)} LF"
+                      if isinstance(length, (int, float))
+                      and not isinstance(length, bool) else "")
+        lot = row["navision_lot"]
+        parts = [f"Roll {row['position']} of {total_rolls}"]
+        if lot not in (None, ""):
+            parts.append(f"Lot {lot}")
+        if length_txt:
+            parts.append(length_txt)
         pdf.set_x(pdf.l_margin)
-        pdf.set_font("Helvetica", "B", 9)
+        pdf.set_font("Helvetica", "B", 14)
         pdf.set_text_color(20, 20, 20)
-        pdf.cell(0, 5.5, _latin1(f"Layout {index}   -   {roll_txt}"),
+        pdf.cell(0, heading_h, _latin1("   -   ".join(parts)),
                  new_x="LMARGIN", new_y="NEXT")
 
         y_bar = pdf.get_y()
-        _draw_run_sheet_bar(pdf, pdf.l_margin, y_bar, bar_w, bar_h, profile)
-        pdf.set_y(y_bar + bar_h + 1.2)
+        _draw_run_sheet_bar(pdf, pdf.l_margin, y_bar, bar_w, bar_h,
+                            row["profile"], label_size=13)
+        pdf.set_y(y_bar + bar_h + 2.0)
 
+        widths_txt = "        ".join(
+            f"{_clean_number(width)} in {code}"
+            for code, width in row["profile"])
         pdf.set_x(pdf.l_margin)
-        pdf.set_font("Helvetica", "", 8.5)
+        pdf.set_font("Helvetica", "B", 14)
         pdf.set_text_color(20, 20, 20)
-        pdf.multi_cell(0, 5, _latin1(breakdown))
-
-        if lots_txt:
-            pdf.set_x(pdf.l_margin)
-            pdf.set_font("Helvetica", "", 7.5)
-            pdf.set_text_color(110, 110, 110)
-            pdf.multi_cell(0, 4, _latin1(lots_txt))
-        pdf.ln(2.5)
+        pdf.cell(0, widths_h, _latin1(widths_txt),
+                 new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(entry_gap)
 
 
 # --------------------------------------------------------------------------
@@ -796,103 +819,6 @@ def _render_report(st, filename, extraction, report, download_stem=None):
         )
 
 
-def _render_split_section(st, report):
-    """Cut the evaluated sequence into separate manufacturing schedules at its
-    most expensive changeovers. Each schedule restarts from a fresh machine
-    state, so the total setup cost drops by exactly the changeovers removed —
-    the best way to cut this fixed ordering into k runs, though not a re-solve
-    of the whole assignment (see `sequencer.choose_cuts`). The elbow view from
-    `split_guidance` shows what each extra schedule would save, so the choice
-    of k is informed rather than guessed."""
-    box = st.container(border=True)
-    box.markdown("#### Split into schedules")
-
-    costs = [e["change_cost_in"] for e in report["manufacturing_sequence"][1:]]
-    if not costs:
-        box.caption("The sequence has no transitions — there is nothing to "
-                    "split.")
-        return
-
-    box.caption(
-        "The combined sequence can be cut into separate manufacturing "
-        "schedules at its most expensive changeovers. Each schedule restarts "
-        "from a fresh machine state, so the total setup cost drops by exactly "
-        "the changeovers removed. This is the best way to cut this fixed "
-        "ordering into k runs — it is not a re-solve of the whole assignment "
-        "across schedules.")
-
-    # Elbow view: what each extra schedule saves, so k is chosen on evidence.
-    guidance = split_guidance(costs)
-    box.dataframe(
-        [{"k": row["k"],
-          "total cost (in)": row["total_cost_in"],
-          "saving from next cut (in)": row["marginal_saving_in"]}
-         for row in guidance],
-        hide_index=True)
-    box.caption("Total setup cost against the number of schedules (k) — the "
-                "elbow shows where one more schedule stops paying its way:")
-    box.line_chart(guidance, x="k", y="total_cost_in")
-
-    method = box.radio(
-        "Split method",
-        ["No split", "Number of schedules (k)",
-         "Changeover threshold (inches)"],
-        horizontal=True)
-
-    split = None
-    if method == "Number of schedules (k)":
-        k = box.number_input("Number of schedules (k)", min_value=1,
-                             max_value=len(costs) + 1, value=1)
-        split = split_report(report, k=int(k))
-    elif method == "Changeover threshold (inches)":
-        threshold = box.number_input(
-            "Split where a changeover exceeds (inches)",
-            min_value=0.0, value=float(max(costs)))
-        split = split_report(report, threshold=float(threshold))
-
-    if split is None:
-        return
-    if split["schedule_count"] < 2:
-        box.caption("The chosen split leaves a single schedule (the threshold "
-                    "sits at or above every changeover, or k is 1) — nothing "
-                    "was cut.")
-        return
-
-    summary = box.columns(3)
-    summary[0].metric("Cost before", f"{split['cost_before_in']} in")
-    summary[1].metric("Cost after", f"{split['cost_after_in']} in")
-    summary[2].metric("Total saving", f"{split['total_saving_in']} in")
-
-    count = split["schedule_count"]
-    for schedule in split["schedules"]:
-        index = schedule["schedule_index"]
-        sbox = box.container(border=True)
-        sbox.markdown(f"#### Schedule {index} of {count}")
-        metrics = sbox.columns(3)
-        metrics[0].metric("Roll rows", schedule["roll_count"])
-        metrics[1].metric("Distinct layouts",
-                          schedule["distinct_layout_count"])
-        metrics[2].metric("Setup cost", f"{schedule['achieved_cost_in']} in")
-        sbox.dataframe(schedule["manufacturing_sequence"], hide_index=True)
-
-        # The per-schedule run sheet needs fpdf2; where it is unavailable,
-        # fall back to a note rather than erroring, as `_render_report` does.
-        try:
-            pdf_bytes = build_run_sheet_pdf(schedule["source_file"], schedule)
-        except Exception as exc:  # noqa: BLE001
-            sbox.caption(
-                "Run sheet PDF needs fpdf2 — run `pip install fpdf2` to "
-                f"enable it ({exc}).")
-        else:
-            sbox.download_button(
-                "Download run sheet (PDF)",
-                data=pdf_bytes,
-                file_name=f"combined.schedule-{index}-of-{count}.run-sheet.pdf",
-                mime="application/pdf",
-                key=f"split-run-sheet-{index}-of-{count}",
-            )
-
-
 def main():
     import streamlit as st
 
@@ -966,8 +892,7 @@ def main():
             help="Separate schedules sequences each workbook on its own. "
                  "Combined joins every upload into one order and sequences "
                  "them together, so layouts shared between files are produced "
-                 "back to back; the combined run can then be split back into "
-                 "schedules at its most expensive changeovers.")
+                 "back to back.")
 
     if mode == "Combined":
         # Every workbook must extract cleanly before they can be joined; the
@@ -1002,7 +927,6 @@ def main():
 
         _render_report(st, combined["source_file"], combined, report,
                        download_stem="combined")
-        _render_split_section(st, report)
         return
 
     for upload in uploads:

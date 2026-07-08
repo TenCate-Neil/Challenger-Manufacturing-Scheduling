@@ -136,7 +136,7 @@ def test_differing_total_widths_warn_and_count_tail():
 
 
 # --- join_orders (combining extraction results) ---------------------------
-def _extraction(name, rolls, mfg_summary=None, warnings=()):
+def _extraction(name, rolls, mfg_summary=None, warnings=(), po=None):
     """Minimal extraction-result dict in the shape the extractor emits (only
     the fields join_orders reads)."""
     out = {"source_file": name, "rolls": rolls, "roll_count": len(rolls)}
@@ -144,6 +144,8 @@ def _extraction(name, rolls, mfg_summary=None, warnings=()):
         out["mfg_summary"] = mfg_summary
     if warnings:
         out["warnings"] = list(warnings)
+    if po is not None:
+        out["general_information"] = {"purchase_order_number": po}
     return out
 
 
@@ -177,6 +179,37 @@ def test_join_orders_clears_file_local_layout_group():
     assert all(r["layout_group"] is None for r in combined["rolls"])
     assert roll_a["layout_group"] == 3
     assert roll_b["layout_group"] == 3
+
+
+def test_join_orders_tags_rolls_with_their_files_purchase_order():
+    # Each joined roll copy carries its own file's PO, so a combined run sheet
+    # can say which purchase order every roll belongs to. The originals gain
+    # no key.
+    rolls_a = [_roll(("FG", 182)), _roll(("FG", 177), ("WHI", 5))]
+    rolls_b = [_roll(("WHI", 182))]
+    combined = rs.join_orders([_extraction("A.xlsx", rolls_a, po="PO-1001"),
+                               _extraction("B.xlsx", rolls_b, po="PO-2002")])
+    assert [r["purchase_order_number"] for r in combined["rolls"]] == \
+        ["PO-1001", "PO-1001", "PO-2002"]
+    for original in rolls_a + rolls_b:
+        assert set(original) == {"segments"}
+
+
+def test_join_orders_purchase_order_none_when_unstated():
+    # No general_information (or a bare roll list) -> the tag is None, not a
+    # crash; downstream renders it as blank.
+    combined = rs.join_orders([_extraction("A.xlsx", [_roll(("FG", 182))]),
+                               [_roll(("WHI", 182))]])
+    assert [r["purchase_order_number"] for r in combined["rolls"]] == \
+        [None, None]
+
+
+def test_join_orders_keeps_existing_roll_po_tag_when_file_states_none():
+    # Re-joining an already-joined result must not wipe the per-roll tags its
+    # rolls already carry (the joined dict itself has no general_information).
+    tagged = dict(_roll(("FG", 182)), purchase_order_number="PO-1001")
+    combined = rs.join_orders([_extraction("A.xlsx", [tagged])])
+    assert combined["rolls"][0]["purchase_order_number"] == "PO-1001"
 
 
 def test_join_orders_combined_name():

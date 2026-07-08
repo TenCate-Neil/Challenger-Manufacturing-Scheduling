@@ -213,6 +213,26 @@ def test_evaluate_achieved_cost_matches_scored_sequence():
     assert report["conservation"]["passed"]
 
 
+def test_sequence_view_carries_extraction_purchase_order():
+    # Single-file path: the rolls carry no PO tag of their own, so every
+    # sequence entry echoes the extraction's PO for the run sheet to print.
+    extraction = {
+        "source_file": "S.xlsx",
+        "general_information": {"purchase_order_number": "PO-7001"},
+    }
+    report = ev.evaluate(_sample_rolls(), extraction=extraction)
+    view = report["manufacturing_sequence"]
+    assert view, "expected a non-empty sequence view"
+    assert all(e["purchase_order_number"] == "PO-7001" for e in view)
+
+
+def test_sequence_view_purchase_order_none_when_absent():
+    # Old inputs with no PO anywhere must not crash; the entry carries None.
+    report = ev.evaluate(_sample_rolls())
+    assert all(e["purchase_order_number"] is None
+               for e in report["manufacturing_sequence"])
+
+
 def test_evaluate_cross_checks_mfg_summary():
     rolls = _sample_rolls()  # linear feet total 400, square feet 6000
     extraction = {
@@ -227,10 +247,10 @@ def test_evaluate_cross_checks_mfg_summary():
 
 
 # --- combined orders (join_orders -> evaluate) ------------------------------
-def _extraction(name, rolls):
+def _extraction(name, rolls, po=None):
     """Extraction-result dict whose MFG summary matches its rolls exactly, so
     the cross-check has a correct second source to compare against."""
-    return {
+    out = {
         "source_file": name,
         "rolls": rolls,
         "mfg_summary": {
@@ -239,6 +259,9 @@ def _extraction(name, rolls):
             "mfg_sf": sum(r["total_mfg_sf"] for r in rolls),
         },
     }
+    if po is not None:
+        out["general_information"] = {"purchase_order_number": po}
+    return out
 
 
 def test_combined_orders_conserve_and_cross_check_cleanly():
@@ -256,6 +279,23 @@ def test_combined_orders_conserve_and_cross_check_cleanly():
     assert "A.xlsx" in report["source_file"]
     assert "B.xlsx" in report["source_file"]
     assert not any("MFG summary" in w for w in report["warnings"])
+
+
+def test_combined_sequence_view_carries_per_roll_purchase_orders():
+    # Combined mode mixes files with different POs, so the PO must be per
+    # entry — each roll shows its own file's PO, whatever order the optimiser
+    # chose. The joined dict itself has no general_information; the per-roll
+    # tags from join_orders carry the information.
+    ext_a = _extraction("A.xlsx", [_roll("A1", ("FG", 182), sort=1),
+                                   _roll("A2", ("FG", 177), ("WHI", 5), sort=2)],
+                        po="PO-1001")
+    ext_b = _extraction("B.xlsx", [_roll("B1", ("WHI", 182), sort=1)],
+                        po="PO-2002")
+    combined = join_orders([ext_a, ext_b])
+    report = ev.evaluate(combined["rolls"], extraction=combined)
+    pos = {e["navision_lot"]: e["purchase_order_number"]
+           for e in report["manufacturing_sequence"]}
+    assert pos == {"A1": "PO-1001", "A2": "PO-1001", "B1": "PO-2002"}
 
 
 def test_combined_cross_check_catches_wrong_file_total():
@@ -292,79 +332,6 @@ def test_cross_check_catches_wrong_physical_roll_count():
     extraction = {"source_file": "S.xlsx", "mfg_summary": {"mfg_rolls": 7}}
     report = ev.evaluate(rolls, extraction=extraction)
     assert any("physical roll" in w for w in report["warnings"])
-
-
-# --- split_report -----------------------------------------------------------
-def test_split_report_k2_cuts_most_expensive_transition():
-    report = ev.evaluate(_sample_rolls())  # 3 distinct layouts
-    view = report["manufacturing_sequence"]
-    costs = [e["change_cost_in"] for e in view[1:]]
-    split = ev.split_report(report, k=2)
-
-    assert split["schedule_count"] == 2
-    assert len(split["schedules"]) == 2
-    assert split["cut_transition_costs"] == [max(costs)]
-    assert split["cut_after_positions"] == [costs.index(max(costs)) + 1]
-    assert split["total_saving_in"] == max(costs)
-    assert split["cost_before_in"] == report["achieved_cost_in"]
-    assert split["cost_after_in"] == report["achieved_cost_in"] - max(costs)
-
-    for schedule in split["schedules"]:
-        seq = schedule["manufacturing_sequence"]
-        assert seq[0]["change_cost_in"] == 0  # fresh start per schedule
-        assert [e["position"] for e in seq] == list(range(1, len(seq) + 1))
-    assert sum(s["achieved_cost_in"] for s in split["schedules"]) == \
-        split["cost_after_in"]
-
-    # Nothing is lost or duplicated at the cut.
-    split_lots = [e["navision_lot"] for s in split["schedules"]
-                  for e in s["manufacturing_sequence"]]
-    assert sorted(split_lots) == sorted(e["navision_lot"] for e in view)
-
-
-def test_split_report_threshold_above_max_is_single_schedule():
-    report = ev.evaluate(_sample_rolls())
-    costs = [e["change_cost_in"] for e in report["manufacturing_sequence"][1:]]
-    split = ev.split_report(report, threshold=max(costs) + 1)
-    assert split["schedule_count"] == 1
-    assert split["cut_after_positions"] == []
-    assert split["total_saving_in"] == 0
-    assert split["cost_after_in"] == report["achieved_cost_in"]
-    assert split["schedules"][0]["roll_count"] == report["roll_count"]
-
-
-def test_split_report_threshold_zero_cuts_every_positive_transition():
-    report = ev.evaluate(_sample_rolls())
-    costs = [e["change_cost_in"] for e in report["manufacturing_sequence"][1:]]
-    positive = [c for c in costs if c > 0]
-    split = ev.split_report(report, threshold=0)
-    assert split["schedule_count"] == len(positive) + 1
-    assert split["total_saving_in"] == sum(positive)
-    # Only zero-cost transitions remain inside the schedules.
-    assert split["cost_after_in"] == 0
-    assert all(s["achieved_cost_in"] == 0 for s in split["schedules"])
-
-
-def test_split_report_k1_is_identity():
-    report = ev.evaluate(_sample_rolls())
-    split = ev.split_report(report, k=1)
-    assert split["schedule_count"] == 1
-    assert split["cut_after_positions"] == []
-    assert split["total_saving_in"] == 0
-    only = split["schedules"][0]
-    assert only["roll_count"] == report["roll_count"]
-    assert only["achieved_cost_in"] == report["achieved_cost_in"]
-    assert only["manufacturing_sequence"] == report["manufacturing_sequence"]
-
-
-def test_split_report_rejects_both_k_and_threshold():
-    report = ev.evaluate(_sample_rolls())
-    try:
-        ev.split_report(report, k=2, threshold=5)
-    except ValueError:
-        pass
-    else:
-        assert False, "expected ValueError"
 
 
 def _run_standalone():
