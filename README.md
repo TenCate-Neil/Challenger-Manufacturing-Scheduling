@@ -294,7 +294,7 @@ python test_app.py                 # standalone runner
 pytest test_app.py                 # if pytest is installed
 ```
 
-## Combined mode and splitting into k schedules
+## Combined mode
 
 Several orders can be joined and sequenced as one combined run.
 `join_orders(extractions)` (in `roll_sequencing.py`) concatenates the rolls of
@@ -315,22 +315,9 @@ python sequencer.py A.json B.json --combine       # one combined sequence
 
 In the app, uploading two or more workbooks shows a toggle: **Separate
 schedules** (each workbook sequenced on its own, the default) or **Combined**
-(all rolls joined into one order and sequenced together).
-
-A combined sequence can then be **split into k manufacturing schedules** by
-cutting its k−1 most expensive transitions — the solved path already clusters
-similar layouts, so the big changeovers are the natural boundaries. Each
-schedule restarts from a fresh machine state (cost 0 at its start), so the
-total setup cost drops by exactly the sum of the removed transitions. Cutting
-the largest edges is the optimal way to partition that fixed ordering into k
-open paths; it is not a proven global optimum over all ways of assigning rolls
-to k schedules, since the ordering was solved before the cuts. Alongside the
-"number of schedules (k)" input there is a threshold option (split wherever a
-changeover exceeds X inches) and an elbow/guidance view — for each k, the
-total cost and the marginal saving one more cut would add — so the choice of k
-can be made from the data. Each schedule renders as its own report section
-with its own PDF run sheet; the CLI equivalents are `--split-k` and
-`--split-threshold` on `evaluate.py`.
+(all rolls joined into one order and sequenced together). A combined order is
+one manufacturing schedule: it renders as a single report with its own PDF run
+sheet, exactly like a single-file order.
 
 ### How far the exact solver goes
 

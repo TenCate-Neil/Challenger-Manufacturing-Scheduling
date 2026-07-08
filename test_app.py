@@ -16,7 +16,7 @@ Runs with pytest, or standalone:
 try:
     from streamlit.testing.v1 import AppTest
     import app  # noqa: F401  (also pulls in the extractor -> openpyxl)
-    from evaluate import evaluate, split_report
+    from evaluate import evaluate
     _HAVE_DEPS = True
 except Exception as _exc:  # noqa: BLE001
     _HAVE_DEPS = False
@@ -230,62 +230,6 @@ def test_combined_collapses_shared_layouts():
     _, report = app.evaluate_combined([ext_a, ext_b])
     # A1 and B1 share a layout signature -> two distinct layouts, not three.
     assert report["distinct_layout_count"] == 2
-
-
-def test_split_schedules_feed_run_sheet_pdf():
-    if not _HAVE_DEPS:
-        return  # skip: dependency-free environment
-    try:
-        import fpdf  # noqa: F401
-    except Exception:  # noqa: BLE001
-        return  # skip: fpdf2 unavailable
-    # Each schedule from `split_report` is report-shaped, so it must feed the
-    # run-sheet renderer unchanged and yield a real PDF.
-    rolls = [_roll("L1", ("FG", 182), sort=1),
-             _roll("L2", ("FG", 177), ("WHI", 5), sort=2),
-             _roll("L3", ("FG", 100), ("WHI", 82), sort=3)]
-    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
-    split = split_report(report, k=2)
-    assert split["schedule_count"] == 2
-    for schedule in split["schedules"]:
-        pdf = app.build_run_sheet_pdf(schedule["source_file"], schedule)
-        assert isinstance(pdf, (bytes, bytearray))
-        assert bytes(pdf[:5]) == b"%PDF-"
-
-
-# A harness that renders the split section on a real evaluate() report with
-# three distinct layouts, so the split UI path is exercised without a workbook.
-_SPLIT_HARNESS = """
-import streamlit as st
-import app
-from evaluate import evaluate
-
-def _roll(lot, *segs, sort=None):
-    return {"navision_lot": lot, "sort": sort, "roll_type": "FIELD",
-            "roll_qty": 1, "mfg_roll_length_lf": 100, "total_mfg_sf": 1500,
-            "layout_signature": "|".join(f"{w}{c}" for c, w in segs),
-            "layout_group": None,
-            "segments": [{"color_code": c, "width_in": w} for c, w in segs]}
-
-rolls = [_roll("L1", ("FG", 182), sort=1),
-         _roll("L2", ("FG", 177), ("WHI", 5), sort=2),
-         _roll("L3", ("FG", 177), ("WHI", 5), sort=3),
-         _roll("L4", ("FG", 100), ("WHI", 82), sort=4)]
-report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
-app._render_split_section(st, report)
-"""
-
-
-def test_render_split_section_path():
-    if not _HAVE_DEPS:
-        return  # skip: dependency-free environment
-    at = AppTest.from_string(_SPLIT_HARNESS).run(timeout=30)
-    assert not at.exception, at.exception
-    # The section heading rendered and the split-method radio exists, with
-    # "No split" as its default so nothing is cut until asked.
-    assert any("Split into schedules" in m.value for m in at.markdown)
-    assert len(at.radio) == 1
-    assert at.radio[0].value == "No split"
 
 
 def test_analyse_upload_rejects_non_workbook():

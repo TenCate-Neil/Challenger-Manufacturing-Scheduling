@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 
 from layout_graph import build_graph, expand_sequence
-from roll_sequencing import _clean_number, join_orders, load_rolls, sequence_cost
+from roll_sequencing import join_orders, load_rolls, sequence_cost
 
 # Orders with at most this many distinct layouts are solved exactly with
 # Held–Karp. The DP is O(2^n * n^2) in time and O(2^n * n) in memory, so this
@@ -295,68 +295,6 @@ def optimise(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS, warnings=None):
         "groups": groups,
         "distance_matrix": matrix,
     }
-
-
-# --------------------------------------------------------------------------
-# Splitting a solved path into k manufacturing schedules
-# --------------------------------------------------------------------------
-def choose_cuts(transition_costs, k=None, threshold=None):
-    """Choose where to cut a solved open path into separate manufacturing
-    schedules. `transition_costs[i]` is the cost of the transition between
-    sequence positions i and i+1; the returned cut indices are ascending
-    positions in that list. Exactly one of `k` / `threshold` must be given:
-
-      - `k`: cut the k-1 most expensive transitions, giving k schedules (or
-        one per roll if k exceeds the sequence length). Ties are broken
-        toward the earlier transition so the result is deterministic.
-      - `threshold`: cut every transition whose cost strictly exceeds it —
-        "split where a changeover exceeds X inches".
-
-    Each schedule restarts from a fresh machine state (cost 0 at its start,
-    matching plan assumption 7), so the total cost drops by exactly the sum
-    of the removed transitions. Cutting the largest edges is therefore
-    optimal for partitioning *this fixed ordering* into k open paths. It is
-    not a proven global optimum over all assignments of rolls to k schedules
-    — the ordering was solved before the cuts — though the solved path
-    already clusters similar layouts, so its big changeovers are the natural
-    boundaries."""
-    if (k is None) == (threshold is None):
-        raise ValueError("give exactly one of k or threshold")
-    if threshold is not None:
-        return [i for i, cost in enumerate(transition_costs)
-                if cost > threshold]
-    if k < 1:
-        raise ValueError(f"k must be at least 1, got {k}")
-    ranked = sorted(range(len(transition_costs)),
-                    key=lambda i: (-transition_costs[i], i))
-    return sorted(ranked[:min(k - 1, len(transition_costs))])
-
-
-def split_guidance(transition_costs, max_k=None):
-    """Elbow data for choosing k: one row per k = 1..max_k with the total
-    cost after cutting the k-1 most expensive transitions and the marginal
-    saving one more cut (k -> k+1) would add.
-
-    The marginal savings are simply the transition costs in descending order,
-    so the total is non-increasing in k and each extra schedule saves no more
-    than the last — the natural k sits where the next saving stops being
-    worth a separate schedule. `max_k` defaults to one more than the number
-    of positive-cost transitions, past which further cuts save nothing."""
-    if max_k is None:
-        max_k = sum(1 for cost in transition_costs if cost > 0) + 1
-    max_k = max(1, min(max_k, len(transition_costs) + 1))
-    ranked = sorted(transition_costs, reverse=True)
-    remaining = sum(transition_costs)
-    rows = []
-    for k in range(1, max_k + 1):
-        saving = ranked[k - 1] if k - 1 < len(ranked) else 0
-        rows.append({
-            "k": k,
-            "total_cost_in": _clean_number(remaining),
-            "marginal_saving_in": _clean_number(saving),
-        })
-        remaining -= saving
-    return rows
 
 
 # --------------------------------------------------------------------------
