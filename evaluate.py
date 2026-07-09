@@ -38,6 +38,8 @@ import json
 import sys
 from pathlib import Path
 
+from bobbin_usage import compute_bobbin_usage
+from item_data import load_item_data
 from item_requirements import item_requirements
 from layout_graph import build_graph, expand_sequence
 from roll_sequencing import (
@@ -307,6 +309,23 @@ def evaluate(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
         if extraction.get("yarn_lbs") is not None:
             item_reqs = item_requirements(extraction, warnings=warnings)
 
+    # Per-bobbin usage of the optimised sequence (bobbin_usage.py). The
+    # feature is data-driven: a checkout without data/item_bobbin_data.csv
+    # loads an empty table and the feature is silently off, and orders in
+    # which no listed item appears carry no `bobbin_usage` key at all. When
+    # it does engage, its warnings (and any data-file warnings) land in the
+    # same `warnings` list, so they surface in the report like all others -
+    # the same pattern as the item requirements above. Combined orders work
+    # unchanged: `join_orders` carries a merged `yarn_lbs` block, which is
+    # the join `compute_bobbin_usage` reads.
+    bobbin_usage = None
+    item_data, item_data_warnings = load_item_data()
+    if item_data:
+        bobbin_usage = compute_bobbin_usage(sequence, extraction, item_data)
+        if bobbin_usage is not None:
+            warnings.extend(item_data_warnings)
+            warnings.extend(bobbin_usage["warnings"])
+
     return {
         "source_file": extraction.get("source_file")
         if isinstance(extraction, dict) else None,
@@ -322,6 +341,9 @@ def evaluate(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
         # Only present when the extraction carries a yarn_lbs block; omitted
         # (not an empty list) otherwise, so older reports keep their shape.
         **({"item_requirements": item_reqs} if item_reqs is not None else {}),
+        # Only present when the item bobbin data file is available and at
+        # least one of its items appears in this order; omitted otherwise.
+        **({"bobbin_usage": bobbin_usage} if bobbin_usage is not None else {}),
         "layout_order": order,
         "layouts": [
             {

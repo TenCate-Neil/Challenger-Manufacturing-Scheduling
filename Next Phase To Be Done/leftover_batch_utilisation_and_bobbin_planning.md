@@ -353,3 +353,29 @@ go/no-go evidence for planned sharing).
    `docs/batch_assignment_context.md` §7).
 5. How partial-bobbin discards are recorded so actual waste can be compared
    against the simulator's prediction.
+
+## 11. First step — implemented
+
+The per-item weight data and a first cut of the consumption model are
+implemented:
+
+- `data/item_bobbin_data.csv` maps each item number to its weight in lb per
+  square foot and its fresh bobbin weight from extrusion. It is edited
+  directly on GitHub; it is seeded with item 121051 (5040 XP+ (6Pin), FG,
+  0.04831 lb/sqft) and the remaining items and fresh bobbin weights are to
+  be filled in.
+- `bobbin_usage.py` computes, per matched item, each roll's consumption per
+  bobbin (`w × length_ft / 36`, §6) and the cumulative depletion along the
+  optimised sequence. When the fresh bobbin weight is filled in it also
+  places planned swap points (zero margin for now; the swap margin from §9
+  question 8 becomes a parameter later) and estimates fresh bobbins
+  consumed under the uniform-position assumption.
+- The Phase 4 report carries this under a `bobbin_usage` key, the web app
+  shows an "Item bobbin usage" card, and the downloadable run-sheet PDF
+  gains a matching section with red BOBBIN SWAP bands alongside the
+  existing SETUP CHANGE bands.
+
+Not yet implemented from this document: the batch-availability side
+(Business Central), the sharing feasibility pipeline (§3.4), partial-bobbin
+reuse within an order, the swap margin, and the per-stop penalty (pending
+the §9 floor answers).
