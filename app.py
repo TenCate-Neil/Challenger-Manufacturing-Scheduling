@@ -356,15 +356,15 @@ def _render_item_requirements(st, extraction, report):
         return str(text).replace("|", "\\|")
 
     lines = [
-        "| Item # | Yarn type | Colour | Lbs needed | Max width (in) "
+        "| Item # | Yarn type | Colour | Max width (in) | Lbs needed "
         "| Bobbins needed |",
         "| --- | --- | --- | ---: | ---: | ---: |",
     ]
     for row in _item_requirement_rows(items):
         lines.append(
             f"| {cell(row['item_number'])} | {cell(row['yarn_type'])} "
-            f"| {cell(row['colour'])} | {row['lbs_needed']} "
-            f"| {row['max_width_in']} | {row['bobbins_required']} |")
+            f"| {cell(row['colour'])} | {row['max_width_in']} "
+            f"| {row['lbs_needed']} | {row['bobbins_required']} |")
     box.markdown("\n".join(lines))
 
     box.caption(
