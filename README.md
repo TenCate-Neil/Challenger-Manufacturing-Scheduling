@@ -336,6 +336,43 @@ python test_item_requirements.py  # standalone runner
 pytest test_item_requirements.py  # if pytest is installed
 ```
 
+## Item bobbin data
+
+`data/item_bobbin_data.csv` holds the per-item weight data behind the bobbin
+usage model: one row per item, with columns `item_number`, `yarn_type`,
+`color_code`, `weight_lb_per_sqft` (the yarn's tufted weight per square foot
+of turf) and `fresh_bobbin_weight_lb` (the pounds of yarn on a fresh bobbin —
+may be left blank until it has been measured). The table is meant to be edited
+directly on GitHub: add a row to cover a new item, or fill in a fresh bobbin
+weight once weighed, and the next analysis picks it up.
+
+The pounds each hanging bobbin loses while one roll is tufted follow from the
+threading geometry: one inch of item width covers 1/12 sqft per foot of roll
+length, and that inch is fed by 3 bobbins, so each bobbin supplies
+
+```
+lb per bobbin = weight_lb_per_sqft × length_lf / 36
+```
+
+— the item's width cancels out, so every bobbin of the item drains at the same
+rate regardless of how wide its segments are.
+
+When an order's items match rows in the table, the Phase 4 report gains a
+`bobbin_usage` key and the app shows an **Item bobbin usage** section — on
+screen after the item batch requirements, and appended to the run sheet PDF.
+Per item it lists every roll the item appears on, in manufacturing order, with
+the pounds drawn per bobbin and the running cumulative. Once the item's fresh
+bobbin weight is filled in, the run sheet also plans **BOBBIN SWAP** bands
+(red, like the SETUP CHANGE bands) before any roll the remaining yarn cannot
+cover, naming how many bobbins to replace; without it, usage is still reported
+but no swaps are planned.
+
+The current model is deliberately simple: it assumes the item hangs at the
+same creel positions on every roll it appears on (so all of its bobbins drain
+in step), and it keeps no safety margin — a swap is flagged the moment the
+cumulative draw would exceed a fresh bobbin's weight. The report states these
+assumptions alongside the figures.
+
 ## Combined mode
 
 Several orders can be joined and sequenced as one combined run.

@@ -380,6 +380,132 @@ def _render_item_requirements(st, extraction, report):
             "run.")
 
 
+def _lb_text(value, decimals=4):
+    """A pounds figure as a fixed-decimals string, or "-" when missing. The
+    per-bobbin draws are small (a roll takes fractions of a pound from each
+    bobbin), so four decimals by default; the per-sqft yarn weights are
+    smaller still and pass five."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:.{decimals}f}"
+    return "-"
+
+
+def _bobbin_usage_rows(item):
+    """The Item bobbin usage table's body cells as display strings, one dict
+    per roll the item appears on (a `bobbin_usage` item's `rolls` entries):
+    widths with any trailing .0 trimmed and per-bobbin pounds to four
+    decimals. `swap_before` stays a bool so each renderer chooses its own
+    marker — a text cell on screen, a red band in the PDF. No Streamlit and
+    no PDF library — the testable core shared by `_render_item_bobbin_usage`
+    and `_draw_bobbin_usage`."""
+    rows = []
+    for roll in item.get("rolls", []):
+        width = roll.get("item_width_in")
+        width_text = (f"{_clean_number(width)}"
+                      if isinstance(width, (int, float))
+                      and not isinstance(width, bool) else "-")
+        rows.append({
+            "position": str(roll.get("position")),
+            "navision_lot": str(roll.get("navision_lot") or ""),
+            "item_width_in": width_text,
+            "bobbins_hanging": str(roll.get("bobbins_hanging")),
+            "lb_per_bobbin": _lb_text(roll.get("lb_per_bobbin")),
+            "cumulative_lb_per_bobbin":
+                _lb_text(roll.get("cumulative_lb_per_bobbin")),
+            "swap_before": bool(roll.get("swap_before")),
+        })
+    return rows
+
+
+def _bobbin_usage_totals_parts(item):
+    """An item's totals line as a list of short phrases, skipping the figures
+    that are None (the swap-related totals are only computed when the item's
+    fresh bobbin weight is known). The renderers join the parts themselves —
+    a dot separator on screen, wide spaces in the PDF (whose core fonts are
+    latin-1)."""
+    totals = item.get("totals") or {}
+    parts = []
+    if totals.get("rolls_with_item") is not None:
+        parts.append(f"rolls with this item: {totals['rolls_with_item']}")
+    if totals.get("total_lb_per_bobbin") is not None:
+        parts.append(f"total drawn per bobbin: "
+                     f"{_lb_text(totals['total_lb_per_bobbin'])} lb")
+    if totals.get("swap_count") is not None:
+        parts.append(f"bobbin swaps: {totals['swap_count']}")
+    if totals.get("estimated_fresh_bobbins_consumed") is not None:
+        parts.append(f"est. fresh bobbins consumed: "
+                     f"{totals['estimated_fresh_bobbins_consumed']}")
+    if totals.get("final_remaining_lb_per_bobbin") is not None:
+        parts.append(f"left per bobbin at the end: "
+                     f"{_lb_text(totals['final_remaining_lb_per_bobbin'])} lb")
+    return parts
+
+
+def _render_item_bobbin_usage(st, report):
+    """Per-item bobbin usage over the run: for each item with weight data in
+    `data/item_bobbin_data.csv`, the pounds every hanging bobbin loses on
+    each roll, the running cumulative, and — where the item's fresh bobbin
+    weight is known — the rolls before which the bobbins must be swapped for
+    fresh ones. Rendered only when the report carries a non-empty
+    `bobbin_usage` key; when the key is absent (or None — no items matched
+    the weight table) this renders nothing at all, so existing reports keep
+    their layout."""
+    usage = report.get("bobbin_usage")
+    if not usage:
+        return
+    box = st.container(border=True)
+    box.markdown("#### Item bobbin usage")
+
+    def cell(text):
+        # A literal "|" in a value would split the markdown table cell.
+        return str(text).replace("|", "\\|")
+
+    items = usage.get("items") or []
+    if not items:
+        box.caption("No items in this order matched the bobbin weight table "
+                    "(`data/item_bobbin_data.csv`).")
+
+    for item in items:
+        box.markdown(f"##### Item {cell(item.get('item_number'))} — "
+                     f"{cell(item.get('yarn_type'))}, "
+                     f"{cell(item.get('color'))}")
+        meta = (f"Yarn weight: "
+                f"{_lb_text(item.get('weight_lb_per_sqft'), 5)} lb/sqft")
+        fresh = item.get("fresh_bobbin_weight_lb")
+        if fresh is not None:
+            meta += f" · fresh bobbin: {_clean_number(fresh)} lb"
+        else:
+            meta += (" · fresh bobbin weight not yet filled in "
+                     "(`data/item_bobbin_data.csv`) — swaps not planned")
+        box.markdown(meta)
+
+        lines = [
+            "| Position | Lot | Item width (in) | Bobbins | lb/bobbin "
+            "| Cumulative lb/bobbin | Swap before |",
+            "| ---: | --- | ---: | ---: | ---: | ---: | :---: |",
+        ]
+        for row in _bobbin_usage_rows(item):
+            if fresh is None:
+                marker = "—"
+            else:
+                marker = "SWAP" if row["swap_before"] else ""
+            lines.append(
+                f"| {row['position']} | {cell(row['navision_lot'])} "
+                f"| {row['item_width_in']} | {row['bobbins_hanging']} "
+                f"| {row['lb_per_bobbin']} "
+                f"| {row['cumulative_lb_per_bobbin']} | {marker} |")
+        box.markdown("\n".join(lines))
+
+        parts = _bobbin_usage_totals_parts(item)
+        if parts:
+            box.markdown("**Totals:** " + " · ".join(parts))
+
+    if usage.get("assumptions"):
+        box.caption(usage["assumptions"])
+    for warning in usage.get("warnings") or []:
+        box.warning(warning)
+
+
 def _render_combined_order(st, sequence):
     """Step 3: the full run in manufacturing order — one bar per physical roll,
     with the setup change cost incurred to switch to it. Placed at the bottom."""
@@ -528,7 +654,9 @@ def build_run_sheet_pdf(filename, report):
     carries the source file, total setup cost, and the roll/layout counts, and a
     large-print section at the bottom gives the exact threading width of every
     physical roll in manufacturing order, with a red SETUP CHANGE band wherever
-    the layout changes."""
+    the layout changes. Reports carrying a `bobbin_usage` key gain an Item
+    bobbin usage section after that (see `_draw_bobbin_usage`); without the
+    key the PDF is unchanged."""
     from fpdf import FPDF
 
     rows = _run_sheet_rows(report)
@@ -630,6 +758,9 @@ def build_run_sheet_pdf(filename, report):
 
     # Large-print per-roll threading widths, at the bottom.
     _draw_layout_breakdowns(pdf, report)
+
+    # Item bobbin usage — appended only when the report carries the key.
+    _draw_bobbin_usage(pdf, report)
 
     return bytes(pdf.output())
 
@@ -781,6 +912,155 @@ def _draw_layout_breakdowns(pdf, report):
         pdf.ln(entry_gap)
 
 
+def _draw_bobbin_usage(pdf, report):
+    """Append the Item bobbin usage section to the run sheet: for every item
+    with weight data, a header line with the item's metadata, a compact table
+    of the rolls it appears on (per-bobbin pounds drawn and the running
+    cumulative), a totals line, and the model's assumptions. Where the item's
+    fresh bobbin weight is known and a roll's `swap_before` is set, a red
+    BOBBIN SWAP band — the bobbin twin of the SETUP CHANGE band — precedes
+    that roll's row, naming how many bobbins to replace. Draws nothing when
+    the report has no `bobbin_usage` key, so the existing PDF is unchanged
+    for reports without one. The PDF's core fonts are latin-1, so the text
+    here sticks to plain ASCII separators."""
+    usage = report.get("bobbin_usage")
+    if not usage:
+        return
+
+    red = (200, 0, 0)
+    row_h, marker_h = 6.5, 9.0
+    w_pos, w_lot, w_width, w_bob, w_lb, w_cum = 12, 40, 28, 20, 28, 42
+    table_w = w_pos + w_lot + w_width + w_bob + w_lb + w_cum
+    columns = [("#", w_pos, "R"), ("Navision lot #", w_lot, "L"),
+               ("Item width (in)", w_width, "R"), ("Bobbins", w_bob, "R"),
+               ("lb/bobbin", w_lb, "R"), ("Cumulative lb/bobbin", w_cum, "R")]
+
+    def ensure(height):
+        """Start a new page when `height` mm would overrun the bottom margin
+        (auto page break is off). True when a page was added."""
+        if pdf.get_y() + height > pdf.h - pdf.b_margin:
+            pdf.add_page()
+            return True
+        return False
+
+    def draw_table_header():
+        pdf.set_x(pdf.l_margin)
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_fill_color(240, 240, 240)
+        pdf.set_draw_color(180, 180, 180)
+        pdf.set_text_color(40, 40, 40)
+        for title, width, align in columns:
+            pdf.cell(width, 6, _latin1(title), border=1, align=align,
+                     fill=True)
+        pdf.ln(6)
+
+    def draw_swap_band(bobbins_text):
+        """A red band before the roll row: rules either side of the swap
+        instruction, spanning the table width."""
+        y_mid = pdf.get_y() + marker_h / 2
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_text_color(*red)
+        pdf.set_draw_color(*red)
+        pdf.set_line_width(0.6)
+        label = _latin1(f"BOBBIN SWAP - replace {bobbins_text} bobbins")
+        label_w = pdf.get_string_width(label)
+        centre = pdf.l_margin + table_w / 2
+        pdf.line(pdf.l_margin, y_mid, centre - label_w / 2 - 4, y_mid)
+        pdf.line(centre + label_w / 2 + 4, y_mid, pdf.l_margin + table_w,
+                 y_mid)
+        pdf.text(centre - label_w / 2, y_mid + 1.5, label)
+        pdf.set_line_width(0.2)
+        pdf.set_y(y_mid + marker_h / 2)
+
+    # Start the section on the current page if it fits, else a fresh page.
+    pdf.ln(5)
+    ensure(50)
+    pdf.set_x(pdf.l_margin)
+    pdf.set_font("Helvetica", "B", 15)
+    pdf.set_text_color(20, 20, 20)
+    pdf.cell(0, 9, _latin1("Item bobbin usage"),
+             new_x="LMARGIN", new_y="NEXT")
+
+    items = usage.get("items") or []
+    if not items:
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(90, 90, 90)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(0, 5, _latin1("No items in this order matched the bobbin "
+                               "weight table (data/item_bobbin_data.csv)."),
+                 new_x="LMARGIN", new_y="NEXT")
+
+    for item in items:
+        fresh = item.get("fresh_bobbin_weight_lb")
+        # Keep the item header, table header and first row together.
+        ensure(14.5 + 6 + row_h)
+
+        pdf.ln(3)
+        pdf.set_x(pdf.l_margin)
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(20, 20, 20)
+        pdf.cell(0, 6.5,
+                 _latin1(f"Item {item.get('item_number')}   -   "
+                         f"{item.get('yarn_type')}, {item.get('color')}"),
+                 new_x="LMARGIN", new_y="NEXT")
+
+        meta = (f"Yarn weight: "
+                f"{_lb_text(item.get('weight_lb_per_sqft'), 5)} lb/sqft")
+        if fresh is not None:
+            meta += f"      Fresh bobbin: {_clean_number(fresh)} lb"
+        else:
+            meta += ("      Fresh bobbin weight not yet filled in "
+                     "(data/item_bobbin_data.csv) - swaps not planned")
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(90, 90, 90)
+        pdf.set_x(pdf.l_margin)
+        pdf.cell(0, 5, _latin1(meta), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(1)
+
+        draw_table_header()
+        for row in _bobbin_usage_rows(item):
+            swap = fresh is not None and row["swap_before"]
+            # Keep a swap band and the row it belongs to on one page.
+            if ensure(row_h + (marker_h if swap else 0)):
+                draw_table_header()
+            if swap:
+                draw_swap_band(row["bobbins_hanging"])
+            pdf.set_x(pdf.l_margin)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.set_text_color(20, 20, 20)
+            pdf.set_draw_color(200, 200, 200)
+            pdf.cell(w_pos, row_h, _latin1(row["position"]),
+                     border=1, align="R")
+            pdf.cell(w_lot, row_h, _latin1(row["navision_lot"]),
+                     border=1, align="L")
+            pdf.cell(w_width, row_h, _latin1(row["item_width_in"]),
+                     border=1, align="R")
+            pdf.cell(w_bob, row_h, _latin1(row["bobbins_hanging"]),
+                     border=1, align="R")
+            pdf.cell(w_lb, row_h, _latin1(row["lb_per_bobbin"]),
+                     border=1, align="R")
+            pdf.cell(w_cum, row_h, _latin1(row["cumulative_lb_per_bobbin"]),
+                     border=1, align="R")
+            pdf.ln(row_h)
+
+        parts = _bobbin_usage_totals_parts(item)
+        if parts:
+            ensure(7)
+            pdf.set_x(pdf.l_margin)
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_text_color(20, 20, 20)
+            pdf.cell(0, 6, _latin1("      ".join(parts)),
+                     new_x="LMARGIN", new_y="NEXT")
+
+    if usage.get("assumptions"):
+        ensure(12)
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.set_text_color(90, 90, 90)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 4.5, _latin1(usage["assumptions"]))
+
+
 # --------------------------------------------------------------------------
 # UI
 # --------------------------------------------------------------------------
@@ -823,6 +1103,10 @@ def _render_report(st, filename, extraction, report, download_stem=None):
     # Item batch requirements — only when the workbook stated a yarn lbs
     # block (the report key is omitted otherwise).
     _render_item_requirements(st, extraction, report)
+
+    # Item bobbin usage — only when the report carries a non-empty
+    # `bobbin_usage` key (items matched in data/item_bobbin_data.csv).
+    _render_item_bobbin_usage(st, report)
 
     # Solution quality.
     qbox = st.container(border=True)

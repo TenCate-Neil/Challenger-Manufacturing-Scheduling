@@ -107,6 +107,8 @@ def test_render_report_path():
     # No yarn_lbs block in the extraction -> no item_requirements key in the
     # report -> the section renders nothing at all.
     assert not any("Item batch requirements" in m.value for m in at.markdown)
+    # Likewise no (truthy) bobbin_usage key -> no Item bobbin usage card.
+    assert not any("Item bobbin usage" in m.value for m in at.markdown)
 
 
 def test_sequence_view_carries_panel_numbers():
@@ -485,6 +487,220 @@ def test_evaluate_combined_carries_item_requirements():
     assert reqs[121051]["bobbins_required"] == 546
     assert reqs[121052]["lbs_needed"] == 20
     assert reqs[121052]["bobbins_required"] == 15
+
+
+def _bobbin_usage_block(fresh):
+    """A synthetic `bobbin_usage` block shaped exactly like the frozen Phase 4
+    report contract — built by hand, never by the bobbin module, so these
+    tests pin the app's rendering of the schema and nothing else. With a
+    known fresh bobbin weight the third roll's bobbins must be swapped first
+    (the cumulative draw would exceed the fresh weight); with `fresh=None`
+    the swap figures are None and no roll is flagged, exactly as the
+    contract states."""
+    known = fresh is not None
+    return {
+        "items": [{
+            "item_number": "121051",
+            "yarn_type": "5040 XP+ 6Pin",
+            "color": "FIELD GREEN",
+            "weight_lb_per_sqft": 0.00123,
+            "fresh_bobbin_weight_lb": fresh,
+            "rolls": [
+                {"position": 1, "navision_lot": "L2", "item_width_in": 177.0,
+                 "bobbins_hanging": 531, "length_lf": 95.0,
+                 "lb_per_bobbin": 0.0032, "cumulative_lb_per_bobbin": 0.0032,
+                 "swap_before": False},
+                {"position": 2, "navision_lot": "L1", "item_width_in": 182.0,
+                 "bobbins_hanging": 546, "length_lf": 120.0,
+                 "lb_per_bobbin": 0.0041, "cumulative_lb_per_bobbin": 0.0073,
+                 "swap_before": False},
+                {"position": 3, "navision_lot": "L1", "item_width_in": 182.0,
+                 "bobbins_hanging": 546, "length_lf": 120.0,
+                 "lb_per_bobbin": 0.0041,
+                 "cumulative_lb_per_bobbin": 0.0041 if known else 0.0114,
+                 "swap_before": known},
+            ],
+            "totals": {
+                "rolls_with_item": 3,
+                "total_lb_per_bobbin": 0.0114,
+                "swap_count": 1 if known else None,
+                "estimated_fresh_bobbins_consumed": 546 if known else None,
+                "final_remaining_lb_per_bobbin":
+                    (fresh - 0.0041) if known else None,
+            },
+        }],
+        "assumptions": "Assumes the item hangs at the same creel positions "
+                       "on every roll it appears on, with no swap margin.",
+        "warnings": ["Synthetic bobbin warning for the tests."],
+    }
+
+
+def _report_with_bobbin_usage(fresh):
+    """A real evaluate() report over synthetic rolls, with the frozen-contract
+    `bobbin_usage` block injected by hand — the rest of the run sheet stays
+    exercised end to end without depending on how the evaluator populates
+    the key."""
+    rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, lf=120),
+             _roll("L2", ("FG", 177), ("WHI", 5), sort=2, lf=95)]
+    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+    report["bobbin_usage"] = _bobbin_usage_block(fresh)
+    return report
+
+
+def test_bobbin_usage_rows_and_totals_formatting():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    # The pure row builder: widths lose a trailing .0, per-bobbin pounds get
+    # four decimals, and the swap flag stays a bool for the renderers.
+    item = _bobbin_usage_block(0.01)["items"][0]
+    rows = app._bobbin_usage_rows(item)
+    assert rows[0] == {"position": "1", "navision_lot": "L2",
+                       "item_width_in": "177", "bobbins_hanging": "531",
+                       "lb_per_bobbin": "0.0032",
+                       "cumulative_lb_per_bobbin": "0.0032",
+                       "swap_before": False}
+    assert rows[2]["swap_before"] is True
+    parts = app._bobbin_usage_totals_parts(item)
+    assert "rolls with this item: 3" in parts
+    assert "total drawn per bobbin: 0.0114 lb" in parts
+    assert "bobbin swaps: 1" in parts
+    assert "est. fresh bobbins consumed: 546" in parts
+    assert "left per bobbin at the end: 0.0059 lb" in parts
+    # With no fresh weight the swap figures are None and drop out entirely.
+    parts_none = app._bobbin_usage_totals_parts(
+        _bobbin_usage_block(None)["items"][0])
+    assert parts_none == ["rolls with this item: 3",
+                          "total drawn per bobbin: 0.0114 lb"]
+
+
+def test_run_sheet_pdf_bobbin_usage_section_and_swap_band():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    if not _have_fpdf():
+        return  # skip: fpdf2 unavailable (or its install is broken)
+    # A report carrying bobbin_usage with a known fresh weight: the PDF gains
+    # the Item bobbin usage section — item metadata, the roll table, and a
+    # red BOBBIN SWAP band before the one roll flagged swap_before.
+    report = _report_with_bobbin_usage(0.01)
+    content = _pdf_content(bytes(app.build_run_sheet_pdf("SAMPLE.xlsx",
+                                                         report)))
+    assert b"Item bobbin usage" in content
+    assert b"121051" in content
+    assert b"FIELD GREEN" in content
+    assert b"0.00123" in content   # weight_lb_per_sqft, five decimals
+    assert b"Fresh bobbin: 0.01 lb" in content
+    assert b"0.0041" in content    # lb/bobbin, four decimals
+    assert content.count(b"BOBBIN SWAP - replace 546 bobbins") == 1
+    # The band is drawn in red, like the SETUP CHANGE band: the red
+    # non-stroking colour operator is set just before its text.
+    idx = content.index(b"BOBBIN SWAP")
+    assert b"0.7843 0 0 rg" in content[max(0, idx - 400):idx]
+    # The totals line and the assumptions sentence both land in the PDF.
+    assert b"bobbin swaps: 1" in content
+    assert b"no swap margin" in content
+
+
+def test_run_sheet_pdf_bobbin_usage_without_fresh_weight():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    if not _have_fpdf():
+        return  # skip: fpdf2 unavailable (or its install is broken)
+    # No fresh bobbin weight: the section still renders (with a note that the
+    # weight is not yet filled in), but no swap can be planned — no BOBBIN
+    # SWAP band anywhere and the None swap totals drop out.
+    report = _report_with_bobbin_usage(None)
+    content = _pdf_content(bytes(app.build_run_sheet_pdf("SAMPLE.xlsx",
+                                                         report)))
+    assert b"Item bobbin usage" in content
+    assert b"not yet filled in" in content
+    assert b"BOBBIN SWAP" not in content
+    assert b"bobbin swaps" not in content
+    assert b"rolls with this item: 3" in content
+
+
+def test_run_sheet_pdf_without_bobbin_usage_key_unchanged():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    if not _have_fpdf():
+        return  # skip: fpdf2 unavailable (or its install is broken)
+    # Without the key the run sheet must build exactly as before: no Item
+    # bobbin usage section and no swap bands. The key is popped explicitly so
+    # the test stays valid even once the evaluator starts adding it.
+    rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, lf=120),
+             _roll("L2", ("FG", 177), ("WHI", 5), sort=2, lf=95)]
+    report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+    report.pop("bobbin_usage", None)
+    pdf = app.build_run_sheet_pdf("SAMPLE.xlsx", report)
+    assert bytes(pdf[:5]) == b"%PDF-"
+    content = _pdf_content(bytes(pdf))
+    assert b"Item bobbin usage" not in content
+    assert b"BOBBIN SWAP" not in content
+
+
+# The render harness with a frozen-contract bobbin_usage block injected into
+# the report, so the on-screen Item bobbin usage card must render.
+_BOBBIN_USAGE_HARNESS = """
+import streamlit as st
+import app
+from evaluate import evaluate
+
+def _roll(lot, *segs, sort=None, lf=100):
+    return {"navision_lot": lot, "sort": sort, "roll_type": "FIELD",
+            "roll_qty": 1, "mfg_roll_length_lf": lf, "total_mfg_sf": 1500,
+            "layout_signature": "|".join(f"{w}{c}" for c, w in segs),
+            "layout_group": None,
+            "segments": [{"color_code": c, "width_in": w} for c, w in segs]}
+
+rolls = [_roll("L1", ("FG", 182), sort=1, lf=120),
+         _roll("L2", ("FG", 177), ("WHI", 5), sort=2, lf=95)]
+report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+report["bobbin_usage"] = {
+    "items": [{"item_number": "121051", "yarn_type": "5040 XP+ 6Pin",
+               "color": "FIELD GREEN", "weight_lb_per_sqft": 0.00123,
+               "fresh_bobbin_weight_lb": 0.005,
+               "rolls": [{"position": 1, "navision_lot": "L1",
+                          "item_width_in": 182.0, "bobbins_hanging": 546,
+                          "length_lf": 120.0, "lb_per_bobbin": 0.0041,
+                          "cumulative_lb_per_bobbin": 0.0041,
+                          "swap_before": False},
+                         {"position": 2, "navision_lot": "L2",
+                          "item_width_in": 177.0, "bobbins_hanging": 531,
+                          "length_lf": 95.0, "lb_per_bobbin": 0.0032,
+                          "cumulative_lb_per_bobbin": 0.0032,
+                          "swap_before": True}],
+               "totals": {"rolls_with_item": 2,
+                          "total_lb_per_bobbin": 0.0073,
+                          "swap_count": 1,
+                          "estimated_fresh_bobbins_consumed": 531,
+                          "final_remaining_lb_per_bobbin": 0.0018}}],
+    "assumptions": "Assumes uniform creel positions and no swap margin.",
+    "warnings": ["Synthetic bobbin warning for the tests."]}
+app._render_report(st, "SAMPLE.xlsx", {"source_file": "SAMPLE.xlsx"}, report)
+"""
+
+
+def test_render_report_shows_item_bobbin_usage():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    at = AppTest.from_string(_BOBBIN_USAGE_HARNESS).run(timeout=30)
+    assert not at.exception, at.exception
+    markdown = [m.value for m in at.markdown]
+    assert any("Item bobbin usage" in v for v in markdown)
+    # The per-item subheading carries the item number, yarn type and colour.
+    assert any("Item 121051" in v and "FIELD GREEN" in v for v in markdown)
+    # The metadata line: weight to five decimals, fresh bobbin weight shown.
+    assert any("0.00123 lb/sqft" in v and "0.005 lb" in v for v in markdown)
+    # The roll table: positions, bobbins, four-decimal pounds, and the SWAP
+    # marker on the flagged roll only.
+    table = next(v for v in markdown if "| Position |" in v)
+    assert "| 531 |" in table
+    assert "0.0041" in table
+    assert table.count("SWAP") == 1
+    # The totals line and the caption-text assumptions sentence.
+    assert any("bobbin swaps: 1" in v for v in markdown)
+    assert any("no swap margin" in c.value for c in at.caption)
+    # Its warnings are shown as warnings, like the report's own.
+    assert any("Synthetic bobbin warning" in w.value for w in at.warning)
 
 
 def _run_standalone():
