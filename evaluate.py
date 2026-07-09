@@ -38,6 +38,7 @@ import json
 import sys
 from pathlib import Path
 
+from item_requirements import item_requirements
 from layout_graph import build_graph, expand_sequence
 from roll_sequencing import (
     _clean_number,
@@ -291,13 +292,20 @@ def evaluate(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
     quality = solution_quality(matrix, cost, optimal, oracle_max_layouts)
     breakdown = transition_breakdown(sequence)
 
-    # Optional cross-check against the extractor's own MFG summary totals.
+    # Optional cross-check against the extractor's own MFG summary totals,
+    # and — when the extraction carries a yarn_lbs block — the per-item batch
+    # requirements (item SKU, lbs of yarn, bobbin count). Item warnings land
+    # in the same `warnings` list, so they surface in the report like all
+    # others.
     extraction_po = None
+    item_reqs = None
     if isinstance(extraction, dict):
         _cross_check_mfg_summary(extraction, sequence, warnings)
         info = extraction.get("general_information")
         if isinstance(info, dict):
             extraction_po = info.get("purchase_order_number")
+        if extraction.get("yarn_lbs") is not None:
+            item_reqs = item_requirements(extraction, warnings=warnings)
 
     return {
         "source_file": extraction.get("source_file")
@@ -311,6 +319,9 @@ def evaluate(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
         "conservation": conservation,
         "solution_quality": quality,
         "transition_breakdown": breakdown,
+        # Only present when the extraction carries a yarn_lbs block; omitted
+        # (not an empty list) otherwise, so older reports keep their shape.
+        **({"item_requirements": item_reqs} if item_reqs is not None else {}),
         "layout_order": order,
         "layouts": [
             {

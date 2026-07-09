@@ -27,6 +27,21 @@ def _skip_reason():
     return f"streamlit/extractor not available ({_IMPORT_ERROR})"
 
 
+def _have_fpdf():
+    """True when fpdf2 imports cleanly. A broken install can blow up with a
+    BaseException-derived error (e.g. pyo3_runtime.PanicException from a bad
+    cryptography build), which a plain `except Exception` guard would let
+    escape — so this catches BaseException, re-raising the control-flow
+    exceptions. PDF-dependent tests skip cleanly either way."""
+    try:
+        import fpdf  # noqa: F401
+        return True
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:  # noqa: BLE001
+        return False
+
+
 def _roll(lot, *segs, sort=None, qty=1, lf=100, sf=1500, panels=None):
     return {"navision_lot": lot, "sort": sort, "roll_type": "FIELD",
             "roll_qty": qty, "mfg_roll_length_lf": lf, "total_mfg_sf": sf,
@@ -87,11 +102,11 @@ def test_render_report_path():
     # wherever fpdf2 is installed (it degrades to a note otherwise).
     labels = [b.label for b in at.download_button]
     assert "Download sequence report (JSON)" in labels
-    try:
-        import fpdf  # noqa: F401
+    if _have_fpdf():
         assert "Download run sheet (PDF)" in labels
-    except ImportError:
-        pass
+    # No yarn_lbs block in the extraction -> no item_requirements key in the
+    # report -> the section renders nothing at all.
+    assert not any("Item batch requirements" in m.value for m in at.markdown)
 
 
 def test_sequence_view_carries_panel_numbers():
@@ -141,10 +156,8 @@ def test_run_sheet_rows_expand_qty_and_carry_fields():
 def test_build_run_sheet_pdf_bytes():
     if not _HAVE_DEPS:
         return  # skip: dependency-free environment
-    try:
-        import fpdf  # noqa: F401
-    except Exception:  # noqa: BLE001
-        return  # skip: fpdf2 unavailable
+    if not _have_fpdf():
+        return  # skip: fpdf2 unavailable (or its install is broken)
     rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, panels="P1-P2"),
              _roll("L2", ("FG", 100), ("WHI", 82), sort=2, panels="P3")]
     report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
@@ -178,10 +191,8 @@ def _pdf_content(pdf_bytes):
 def test_run_sheet_pdf_shows_per_roll_purchase_orders():
     if not _HAVE_DEPS:
         return  # skip: dependency-free environment
-    try:
-        import fpdf  # noqa: F401
-    except Exception:  # noqa: BLE001
-        return  # skip: fpdf2 unavailable
+    if not _have_fpdf():
+        return  # skip: fpdf2 unavailable (or its install is broken)
     # A combined run mixes files with different POs, so the run sheet needs a
     # per-roll "PO #" column: both PO values must land in the PDF text, not
     # just one header-level PO.
@@ -201,10 +212,8 @@ def test_run_sheet_pdf_shows_per_roll_purchase_orders():
 def test_breakdown_one_entry_per_physical_roll():
     if not _HAVE_DEPS:
         return  # skip: dependency-free environment
-    try:
-        import fpdf  # noqa: F401
-    except Exception:  # noqa: BLE001
-        return  # skip: fpdf2 unavailable
+    if not _have_fpdf():
+        return  # skip: fpdf2 unavailable (or its install is broken)
     # The bottom breakdown is per physical roll, not per distinct layout: a
     # qty=2 entry yields two breakdown entries (both carrying its lot), so
     # rolls that share a layout but differ in length each get their own block.
@@ -224,10 +233,8 @@ def test_breakdown_one_entry_per_physical_roll():
 def test_breakdown_shows_lengths_and_no_total_suffix():
     if not _HAVE_DEPS:
         return  # skip: dependency-free environment
-    try:
-        import fpdf  # noqa: F401
-    except Exception:  # noqa: BLE001
-        return  # skip: fpdf2 unavailable
+    if not _have_fpdf():
+        return  # skip: fpdf2 unavailable (or its install is broken)
     # Each breakdown entry states the roll's length in LF, and the segment
     # widths are spelled out without any "= 182 in total" suffix anywhere.
     rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, lf=120),
@@ -245,10 +252,8 @@ def test_breakdown_shows_lengths_and_no_total_suffix():
 def test_breakdown_setup_change_marker_between_differing_layouts():
     if not _HAVE_DEPS:
         return  # skip: dependency-free environment
-    try:
-        import fpdf  # noqa: F401
-    except Exception:  # noqa: BLE001
-        return  # skip: fpdf2 unavailable
+    if not _have_fpdf():
+        return  # skip: fpdf2 unavailable (or its install is broken)
     # Two distinct layouts -> the optimised run has exactly one costly
     # transition, so exactly one red SETUP CHANGE band separates the entries
     # (not one before every roll, and none between the identical-layout pair).
@@ -266,10 +271,8 @@ def test_breakdown_setup_change_marker_between_differing_layouts():
 def test_breakdown_no_setup_change_when_layouts_identical():
     if not _HAVE_DEPS:
         return  # skip: dependency-free environment
-    try:
-        import fpdf  # noqa: F401
-    except Exception:  # noqa: BLE001
-        return  # skip: fpdf2 unavailable
+    if not _have_fpdf():
+        return  # skip: fpdf2 unavailable (or its install is broken)
     # Every roll shares one layout -> no costly transition anywhere, so the
     # breakdown shows the rolls back to back with no SETUP CHANGE band.
     rolls = [_roll("L1", ("FG", 182), sort=1, qty=2, lf=120),
@@ -282,11 +285,13 @@ def test_breakdown_no_setup_change_when_layouts_identical():
         assert content.count(f"Roll {n} of 3".encode("latin-1")) == 1, n
 
 
-def _extraction(name, rolls, po=None):
+def _extraction(name, rolls, po=None, yarn_lbs=None):
     # A synthetic extraction dict shaped like `extract_workbook`'s output,
     # with a correct MFG summary derived from the rolls (roll_qty, LF and SF
     # summed the same way the evaluator's cross-check sums the sequence).
-    return {
+    # Pass `yarn_lbs` to carry the per-item yarn pounds block; extractions
+    # without one omit the key, exactly as the extractor does.
+    out = {
         "source_file": name,
         "rolls": rolls,
         "roll_count": len(rolls),
@@ -298,6 +303,9 @@ def _extraction(name, rolls, po=None):
         },
         "warnings": [],
     }
+    if yarn_lbs is not None:
+        out["yarn_lbs"] = yarn_lbs
+    return out
 
 
 def test_evaluate_combined_two_orders():
@@ -351,6 +359,132 @@ def test_analyse_upload_rejects_non_workbook():
     except Exception:  # noqa: BLE001
         raised = True
     assert raised
+
+
+def test_item_requirement_rows_formatting():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    # The pure row builder: pounds get one decimal and a thousands separator,
+    # widths lose a trailing .0 but keep genuine fractions, colour names are
+    # shown where they differ from the code, and SKUs are never coerced.
+    items = [
+        {"item_number": 121051, "yarn_position": "Y1",
+         "yarn_type": "5040 XP+ (6Pin)", "color_code": "FG",
+         "color_name": "FIELD GREEN", "lbs_needed": 4653.369708,
+         "max_width_in": 182.0, "bobbins_required": 546},
+        {"item_number": "145190A", "yarn_position": "Y2",
+         "yarn_type": "MF TXT 7200/10", "color_code": "WHI",
+         "color_name": "WHI", "lbs_needed": 950,
+         "max_width_in": 12.5, "bobbins_required": 38},
+    ]
+    rows = app._item_requirement_rows(items)
+    assert rows[0] == {"item_number": "121051",
+                       "yarn_type": "5040 XP+ (6Pin)",
+                       "colour": "FIELD GREEN", "lbs_needed": "4,653.4",
+                       "max_width_in": "182", "bobbins_required": "546"}
+    # A colour name equal to the code falls back to the bare code.
+    assert rows[1] == {"item_number": "145190A",
+                       "yarn_type": "MF TXT 7200/10",
+                       "colour": "WHI", "lbs_needed": "950.0",
+                       "max_width_in": "12.5", "bobbins_required": "38"}
+
+
+# The render harness above has no yarn_lbs block; this twin carries one, so
+# the report gains `item_requirements` and the section must render.
+_ITEM_REQ_HARNESS = """
+import streamlit as st
+import app
+from evaluate import evaluate
+
+rolls = [{"navision_lot": "L1", "sort": 1, "roll_type": "FIELD",
+          "roll_qty": 1, "mfg_roll_length_lf": 100, "total_mfg_sf": 1500,
+          "layout_signature": "177FG|5WHI", "layout_group": None,
+          "segments": [{"color_code": "FG", "width_in": 177},
+                       {"color_code": "WHI", "width_in": 5}]}]
+extraction = {
+    "source_file": "SAMPLE.xlsx", "rolls": rolls,
+    "yarn_lbs": [{"yarn_position": "Y1", "yarn_type": "5040 XP+ (6Pin)",
+                  "colors": [{"color_code": "FG", "color_name": "FIELD GREEN",
+                              "sku": 121051, "lbs_needed": 4653.37},
+                             {"color_code": "WHI", "color_name": "WHITE",
+                              "sku": "145190A", "lbs_needed": 1644.88}]}]}
+report = evaluate(rolls, extraction=extraction)
+app._render_report(st, "SAMPLE.xlsx", extraction, report)
+"""
+
+
+def test_render_report_shows_item_batch_requirements():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    at = AppTest.from_string(_ITEM_REQ_HARNESS).run(timeout=30)
+    assert not at.exception, at.exception
+    markdown = [m.value for m in at.markdown]
+    assert any("Item batch requirements" in v for v in markdown)
+    table = next(v for v in markdown if "| Item # |" in v)
+    # FG spans 177" in the only roll -> ceil(177 x 3) = 531 bobbins; the
+    # pounds are formatted to one decimal with a thousands separator, and the
+    # string SKU passes through untouched.
+    assert "| 121051 |" in table
+    assert "4,653.4" in table
+    assert "| 531 |" in table
+    assert "145190A" in table
+    assert "FIELD GREEN" in table
+    # A single file is not a combined order -> no combined-mode caption.
+    assert not any("summed across the input files" in c.value
+                   for c in at.caption)
+
+
+def test_render_item_requirements_empty_list_and_combined_caption():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    # Empty (but present) item_requirements: the heading and a "none found"
+    # caption, no table. A `source_files` key marks a joined order and adds
+    # the combined-mode caption under the table.
+    harness = """
+import streamlit as st
+import app
+app._render_item_requirements(
+    st, {"source_file": "S.xlsx"}, {"item_requirements": []})
+app._render_item_requirements(
+    st, {"source_file": "A.xlsx + B.xlsx", "source_files": ["A.xlsx", "B.xlsx"]},
+    {"item_requirements": [
+        {"item_number": 121051, "yarn_position": "Y1", "yarn_type": "5040",
+         "color_code": "FG", "color_name": "FIELD GREEN",
+         "lbs_needed": 200.0, "max_width_in": 177, "bobbins_required": 531}]})
+"""
+    at = AppTest.from_string(harness).run(timeout=30)
+    assert not at.exception, at.exception
+    headings = [m.value for m in at.markdown
+                if "Item batch requirements" in m.value]
+    assert len(headings) == 2
+    captions = [c.value for c in at.caption]
+    assert any("No item requirements were found" in c for c in captions)
+    assert any("summed across the input files" in c for c in captions)
+
+
+def test_evaluate_combined_carries_item_requirements():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    # Two files, each stating a yarn_lbs block: the joined order carries the
+    # merged block, so the combined report gets item_requirements with the
+    # pounds summed and the max width taken across all combined rolls.
+    yarn = [{"yarn_position": "Y1", "yarn_type": "5040 XP+",
+             "colors": [{"color_code": "FG", "color_name": "FIELD GREEN",
+                         "sku": 121051, "lbs_needed": 100.0},
+                        {"color_code": "WHI", "color_name": "WHITE",
+                         "sku": 121052, "lbs_needed": 10.0}]}]
+    ext_a = _extraction("A.xlsx", [_roll("A1", ("FG", 182), sort=1)],
+                        yarn_lbs=yarn)
+    ext_b = _extraction("B.xlsx", [_roll("B1", ("FG", 177), ("WHI", 5), sort=1)],
+                        yarn_lbs=yarn)
+    _, report = app.evaluate_combined([ext_a, ext_b])
+    reqs = {r["item_number"]: r for r in report["item_requirements"]}
+    # Pounds doubled; FG's widest roll is A1's 182", WHI's is B1's 5".
+    assert reqs[121051]["lbs_needed"] == 200
+    assert reqs[121051]["max_width_in"] == 182
+    assert reqs[121051]["bobbins_required"] == 546
+    assert reqs[121052]["lbs_needed"] == 20
+    assert reqs[121052]["bobbins_required"] == 15
 
 
 def _run_standalone():

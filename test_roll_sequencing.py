@@ -136,7 +136,8 @@ def test_differing_total_widths_warn_and_count_tail():
 
 
 # --- join_orders (combining extraction results) ---------------------------
-def _extraction(name, rolls, mfg_summary=None, warnings=(), po=None):
+def _extraction(name, rolls, mfg_summary=None, warnings=(), po=None,
+                yarn_lbs=None):
     """Minimal extraction-result dict in the shape the extractor emits (only
     the fields join_orders reads)."""
     out = {"source_file": name, "rolls": rolls, "roll_count": len(rolls)}
@@ -146,7 +147,18 @@ def _extraction(name, rolls, mfg_summary=None, warnings=(), po=None):
         out["warnings"] = list(warnings)
     if po is not None:
         out["general_information"] = {"purchase_order_number": po}
+    if yarn_lbs is not None:
+        out["yarn_lbs"] = yarn_lbs
     return out
+
+
+def _yarn(position, yarn_type, *colors):
+    """A yarn_lbs row from (color_code, sku, lbs_needed) triples, in the
+    shape the extractor emits."""
+    return {"yarn_position": position, "yarn_type": yarn_type,
+            "colors": [{"color_code": code, "color_name": code,
+                        "sku": sku, "lbs_needed": lbs}
+                       for code, sku, lbs in colors]}
 
 
 def test_join_orders_concatenates_and_tags_copies():
@@ -269,8 +281,96 @@ def test_join_orders_prefixes_warnings_with_source():
         _extraction("A.xlsx", [], warnings=["width mismatch"]),
         _extraction("B.xlsx", [], warnings=["odd colour code"]),
     ])
-    assert combined["warnings"] == ["A.xlsx: width mismatch",
-                                    "B.xlsx: odd colour code"]
+    # The per-file warnings come first, source-prefixed; the joined-order
+    # note about the missing yarn_lbs blocks follows them.
+    assert combined["warnings"][:2] == ["A.xlsx: width mismatch",
+                                        "B.xlsx: odd colour code"]
+    assert all("yarn_lbs" in w for w in combined["warnings"][2:])
+
+
+def test_join_orders_merges_yarn_lbs_when_every_input_states_it():
+    # Both files price Y1 FG under the same SKU -> one combined entry with
+    # the pounds summed (100.5 + 49.5 comes back as the clean 150). Widths,
+    # and hence bobbins, come from the combined rolls downstream, so the
+    # block carries pounds only.
+    combined = rs.join_orders([
+        _extraction("A.xlsx", [],
+                    yarn_lbs=[_yarn("Y1", "5040 XP+", ("FG", 121051, 100.5))]),
+        _extraction("B.xlsx", [],
+                    yarn_lbs=[_yarn("Y1", "5040 XP+", ("FG", 121051, 49.5))]),
+    ])
+    assert combined["yarn_lbs"] == [
+        {"yarn_position": "Y1", "yarn_type": "5040 XP+",
+         "colors": [{"color_code": "FG", "color_name": "FG",
+                     "sku": 121051, "lbs_needed": 150}]}]
+    assert not any("yarn" in w.lower() for w in combined["warnings"])
+
+
+def test_join_orders_yarn_lbs_keeps_first_seen_order_and_new_colours():
+    # Yarn rows are keyed by yarn type in first-seen order; a colour only one
+    # file states still appears, with its own pounds untouched.
+    combined = rs.join_orders([
+        _extraction("A.xlsx", [],
+                    yarn_lbs=[_yarn("Y1", "5040 XP+", ("FG", 121051, 100))]),
+        _extraction("B.xlsx", [],
+                    yarn_lbs=[_yarn("Y2", "MF TXT", ("WHI", 145191, 30)),
+                              _yarn("Y1", "5040 XP+", ("LIM", 121062, 20))]),
+    ])
+    assert [y["yarn_type"] for y in combined["yarn_lbs"]] == \
+        ["5040 XP+", "MF TXT"]
+    assert [(c["color_code"], c["lbs_needed"])
+            for c in combined["yarn_lbs"][0]["colors"]] == \
+        [("FG", 100), ("LIM", 20)]
+    assert [(c["color_code"], c["lbs_needed"])
+            for c in combined["yarn_lbs"][1]["colors"]] == [("WHI", 30)]
+
+
+def test_join_orders_yarn_position_none_when_sources_disagree():
+    # The same yarn type sits at Y1 in one file and Y2 in the other: the
+    # combined row keeps the type (that is the item's identity) but can no
+    # longer claim a single creel position.
+    combined = rs.join_orders([
+        _extraction("A.xlsx", [],
+                    yarn_lbs=[_yarn("Y1", "5040 XP+", ("FG", 121051, 100))]),
+        _extraction("B.xlsx", [],
+                    yarn_lbs=[_yarn("Y2", "5040 XP+", ("FG", 121051, 50))]),
+    ])
+    assert combined["yarn_lbs"] == [
+        {"yarn_position": None, "yarn_type": "5040 XP+",
+         "colors": [{"color_code": "FG", "color_name": "FG",
+                     "sku": 121051, "lbs_needed": 150}]}]
+
+
+def test_join_orders_omits_yarn_lbs_and_warns_when_any_input_lacks_it():
+    # Mirrors the mfg_summary philosophy: the block is carried only when
+    # every input states one — a partial merge would understate an item's
+    # pounds. The warning names the file(s) that lack it.
+    combined = rs.join_orders([
+        _extraction("A.xlsx", [],
+                    yarn_lbs=[_yarn("Y1", "5040 XP+", ("FG", 121051, 100))]),
+        _extraction("B.xlsx", []),
+    ])
+    assert "yarn_lbs" not in combined
+    assert any("yarn_lbs" in w and "B.xlsx" in w and "A.xlsx" not in w
+               for w in combined["warnings"]), combined["warnings"]
+
+
+def test_join_orders_yarn_lbs_sku_conflict_stays_separate_and_warns():
+    # The same yarn type + colour under different SKUs across files means the
+    # workbooks number the item inconsistently. That must stay visible: two
+    # separate entries (each keeping its own pounds) plus a warning, never a
+    # silent merge under either SKU.
+    combined = rs.join_orders([
+        _extraction("A.xlsx", [],
+                    yarn_lbs=[_yarn("Y1", "5040 XP+", ("FG", 121051, 100))]),
+        _extraction("B.xlsx", [],
+                    yarn_lbs=[_yarn("Y1", "5040 XP+", ("FG", "121051A", 50))]),
+    ])
+    colors = combined["yarn_lbs"][0]["colors"]
+    assert [(c["sku"], c["lbs_needed"]) for c in colors] == \
+        [(121051, 100), ("121051A", 50)]
+    assert any("different SKUs" in w and "FG" in w
+               for w in combined["warnings"]), combined["warnings"]
 
 
 def _run_standalone():

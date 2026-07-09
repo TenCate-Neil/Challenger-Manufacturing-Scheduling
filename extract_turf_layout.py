@@ -13,6 +13,8 @@ For each input workbook, writes a JSON file with:
   - mfg_summary            (roll/weight/truck totals, cells M15:T16)
   - yarn_skus              (creel position -> yarn type -> available colors + SKUs,
                              rows 671-676)
+  - yarn_lbs               (yarn row -> colour -> item SKU + total lbs of yarn
+                             needed for the order, rows 638-647)
   - rolls                  (the roll-by-roll cut layout, row 684 onward, grouped by
                              setup change / creel change)
   - warnings               (anything that didn't match the expected template shape)
@@ -304,6 +306,66 @@ def extract_yarn_skus(ws, legend, warnings):
 
 
 # --------------------------------------------------------------------------
+# Block 4b: Yarn SKUs & Total Lbs. Needed  (rows 638-647, columns A-Z)
+# --------------------------------------------------------------------------
+def extract_yarn_lbs(ws, legend, warnings):
+    """The per-item yarn requirements block: for each yarn row (Y1-Y4) and
+    each colour used in the order, the item SKU and the total pounds of that
+    yarn needed. Colour codes sit in row 639 (E..Z); each yarn row is a pair
+    of rows — the SKU row (640/642/644/646) and a 'Yarn Lbs.' row directly
+    beneath it. Unused colours carry the string '#N/A' (treated as absent) in
+    the SKU row and 0 in the lbs row."""
+    require(ws, "B638", "Yarn SKUs & Total Lbs. Needed", warnings, "yarn lbs header")
+    require(ws, "B639", "Yarn Type", warnings, "yarn lbs colour header row")
+
+    def num_or_none(v):
+        return v if isinstance(v, (int, float)) else None
+
+    color_columns = []  # (col_index, code)
+    for col in range(5, 27):  # E..Z
+        code = ws.cell(row=639, column=col).value
+        if code:
+            color_columns.append((col, str(code).strip()))
+
+    yarn_rows = []
+    for sku_row in (640, 642, 644, 646):
+        lbs_row = sku_row + 1
+        yarn_position = to_clean(ws.cell(row=sku_row, column=1).value)  # A
+        yarn_type = ws.cell(row=sku_row, column=2).value                # B
+        if yarn_type in (None, 0, "0"):
+            continue  # unused creel/yarn slot
+        require(ws, f"D{sku_row}", "SKU", warnings,
+                f"yarn lbs SKU label ({yarn_position})")
+        require(ws, f"B{lbs_row}", "Yarn Lbs.", warnings,
+                f"yarn lbs row label ({yarn_position})")
+
+        colors = []
+        for col, code in color_columns:
+            sku = to_clean(ws.cell(row=sku_row, column=col).value)
+            if sku == "#N/A":
+                sku = None
+            lbs = num_or_none(ws.cell(row=lbs_row, column=col).value)
+            if sku is None and not (lbs is not None and lbs > 0):
+                continue  # colour unused by this yarn row
+            if sku is None:
+                warnings.append(
+                    f"Yarn lbs block: {yarn_position} colour {code} needs "
+                    f"{lbs} lbs but has no SKU.")
+            colors.append({
+                "color_code": code,
+                "color_name": color_name(legend, code),
+                "sku": sku,
+                "lbs_needed": lbs,
+            })
+        yarn_rows.append({
+            "yarn_position": yarn_position,
+            "yarn_type": to_clean(yarn_type),
+            "colors": colors,
+        })
+    return yarn_rows
+
+
+# --------------------------------------------------------------------------
 # Block 5: Roll layout table (row 684 onward, ends at literal "Creel Change")
 # --------------------------------------------------------------------------
 SEGMENT_COLUMNS = [(10, 11), (12, 13), (14, 15), (16, 17), (18, 19),
@@ -439,6 +501,7 @@ def extract_workbook(xlsx_path):
     product_specifications = extract_product_specifications(ws, image_hashes, warnings)
     mfg_summary = extract_mfg_summary(ws, warnings)
     yarn_skus = extract_yarn_skus(ws, legend, warnings)
+    yarn_lbs = extract_yarn_lbs(ws, legend, warnings)
     rolls, num_setup_groups = extract_rolls(ws, legend, warnings)
 
     return {
@@ -447,6 +510,7 @@ def extract_workbook(xlsx_path):
         "product_specifications": product_specifications,
         "mfg_summary": mfg_summary,
         "yarn_skus": yarn_skus,
+        "yarn_lbs": yarn_lbs,
         "rolls": rolls,
         "roll_count": len(rolls),
         "distinct_layout_count": len({r["layout_group"] for r in rolls}),
