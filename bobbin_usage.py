@@ -23,11 +23,19 @@ in which the item occupies W inches of width:
     bobbins feeding = 3 x W
     lb per bobbin   = w x L / 36          - the width cancels
 
-Width cancelling means every bobbin of an item depletes at the same rate
-regardless of which inch position it feeds; only tufted length matters. That
-is what makes a *uniform-position* model honest: one running total per item
-stands for every one of its bobbins. Same-colour segments within a roll sum
-their widths (5" + 5" behaves as 10" - more bobbins, same lb each).
+Width cancelling means every bobbin *fed by the same rolls* depletes at the
+same rate; only tufted length matters. But real orders vary an item's width
+across rolls, so different inch positions can be fed by different subsets of
+the sequence: the positions on the extra inches of a wider roll join late
+and deplete less. This module therefore keeps a ledger per inch position,
+with layouts aligned from the front of the machine (inch 0 at the front -
+the fixed-creel alignment the setup cost model already assumes): a position
+covered by a roll draws that roll's lb per bobbin, a position the roll does
+not cover is untouched by it. Positions with an identical coverage history
+(the same set of sequence steps feeding them) carry identical numbers, so
+the report groups them into *depletion classes* (`bobbin_groups`).
+Same-colour segments within a roll sum their widths (5" + 5" behaves as
+10" - more bobbins, same lb each) but keep their own inch positions.
 
 Length accounting
 -----------------
@@ -45,12 +53,14 @@ matches the printed run sheet.
 
 Swap planning
 -------------
-When the item's fresh-bobbin net weight is known, a swap is planned *before*
-any roll that the remaining yarn cannot cover - zero margin, exactly at need.
-The planners' informal ~10% buffer (brief section 8) is deliberately not
-baked in here; the report shows the un-buffered numbers and the margin policy
-stays a planning decision. When the fresh weight is unknown (blank in the
-data file), consumption still accumulates but no swaps are planned.
+When the item's fresh-bobbin net weight is known, a position's bobbins are
+swapped *before* any roll that their remaining yarn cannot cover - zero
+margin, exactly at need - and only the positions that actually run short are
+swapped (`bobbins_swapped` per roll). The planners' informal ~10% buffer
+(brief section 8) is deliberately not baked in here; the report shows the
+un-buffered numbers and the margin policy stays a planning decision. When
+the fresh weight is unknown (blank in the data file), consumption still
+accumulates but no swaps are planned.
 
 Usage:
     python bobbin_usage.py EXTRACTED.json [EXTRACTED2.json ...]
@@ -77,11 +87,13 @@ BOBBINS_PER_INCH = 3
 _TOL = 1e-9
 
 _ASSUMPTIONS = (
-    "Uniform-position model: every bobbin of an item depletes at the same "
-    "rate (per-bobbin consumption is width-independent), bobbins are assumed "
-    "to persist on the creel across rolls and setup changes, and swaps are "
-    "planned with zero margin - a swap is placed before a roll only when the "
-    "remaining yarn cannot cover that roll."
+    "Per-position model: consumption is tracked per inch position, with "
+    "layouts aligned from the front of the machine (fixed creel positions - "
+    "the same alignment the setup cost model assumes), so positions joining "
+    "only on wider rolls carry their own, lower depletion. Bobbins are "
+    "assumed to persist on the creel across rolls and setup changes, and "
+    "swaps are planned with zero margin - a position's bobbins are swapped "
+    "before a roll only when their remaining yarn cannot cover that roll."
 )
 
 
@@ -214,33 +226,73 @@ def _panel_only_color(roll, color_code):
     return False
 
 
+def _coverage_intervals(roll, color_code):
+    """The inch intervals the colour occupies in the roll's own segments, as
+    a merged, ascending list of (start, end) pairs. Positions are absolute
+    inches from the front of the machine (inch 0 at the front): offsets
+    accumulate over the ordered segment widths, so layouts align at the
+    front - the fixed-creel alignment the whole cost model assumes. A
+    non-numeric segment width shifts nothing and covers nothing (the same
+    treatment `_color_width_in` gives it)."""
+    intervals = []
+    offset = 0
+    for seg in roll.get("segments") or []:
+        width = seg.get("width_in")
+        if not isinstance(width, (int, float)) or isinstance(width, bool):
+            continue
+        if seg.get("color_code") == color_code and width > 0:
+            intervals.append((offset, offset + width))
+        offset += width
+    intervals.sort()
+    merged = []
+    for start, end in intervals:
+        if merged and start <= merged[-1][1] + _TOL:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def _depletion_classes(coverages):
+    """Inch positions grouped by identical coverage history. `coverages`
+    lists, per item-carrying sequence step, that step's coverage intervals
+    (from `_coverage_intervals`). Positions fed by exactly the same set of
+    steps deplete identically, so one ledger entry stands for all of them.
+    Returns {history: width_in} where history is the ascending tuple of step
+    indices feeding that class and width_in the total inches in it."""
+    points = sorted({point for coverage in coverages
+                     for interval in coverage for point in interval})
+    # Collapse float-noise duplicates so breakpoints that should coincide
+    # (the same offset reached via different segment splits) do.
+    breaks = []
+    for point in points:
+        if not breaks or point - breaks[-1] > _TOL:
+            breaks.append(point)
+    classes = {}
+    for start, end in zip(breaks, breaks[1:]):
+        mid = (start + end) / 2
+        history = tuple(
+            i for i, coverage in enumerate(coverages)
+            if any(a - _TOL <= mid <= b + _TOL for a, b in coverage))
+        if history:
+            classes[history] = classes.get(history, 0) + (end - start)
+    return classes
+
+
 # --------------------------------------------------------------------------
 # Per-item usage over the expanded sequence
 # --------------------------------------------------------------------------
 def _item_usage(item, color_code, physical_rolls, warnings):
-    """One item's roll-by-roll bobbin usage over the expanded sequence.
+    """One item's roll-by-roll bobbin usage over the expanded sequence, with
+    depletion tracked per inch position (grouped into depletion classes).
     Returns the item's report entry (schema in `compute_bobbin_usage`)."""
     weight = item["weight_lb_per_sqft"]
     fresh = item["fresh_bobbin_weight_lb"]
-
-    rows = []
-    cumulative = 0
-    swap_count = 0
-    # Fresh bobbins consumed, under the uniform-position assumption: we do
-    # not track individual creel positions, so we estimate as if the item
-    # always occupies the same stretch of creel. The first item-carrying roll
-    # hangs a fresh set (3 x its item width); when a later roll widens the
-    # item beyond the widest seen so far, only the new positions hang fresh
-    # bobbins (3 x the increase) - positions already hanging are assumed to
-    # persist, including through narrower rolls in between; and a planned
-    # swap replaces that roll's full set (3 x its item width) with fresh
-    # bobbins. Narrow-then-wide sequences that in reality re-hang partials
-    # are counted as persisting, so this is an estimate, not an inventory
-    # count.
-    fresh_consumed = 0
-    running_max_bobbins = 0
     warned_lots = set()
 
+    # First pass: the sequence steps that carry the item, each with its inch
+    # coverage from the front of the machine.
+    steps = []
     for position, roll, length_lf in physical_rolls:
         if _panel_only_color(roll, color_code):
             lot = roll.get("navision_lot")
@@ -255,46 +307,97 @@ def _item_usage(item, color_code, physical_rolls, warnings):
         width = _color_width_in(roll, color_code)
         if width <= 0:
             continue
-
-        bobbins = int(round(BOBBINS_PER_INCH * width))
         lb_per_bobbin = weight * length_lf / 36
-        swap_before = False
-        if fresh is not None:
-            if lb_per_bobbin > fresh + _TOL:
-                lot = roll.get("navision_lot")
-                if ("over", lot) not in warned_lots:
-                    warned_lots.add(("over", lot))
-                    warnings.append(
-                        f"Bobbin usage: roll {lot} needs {lb_per_bobbin:.3f} "
-                        f"lb per bobbin of item {item['item_number']}, more "
-                        f"than a fresh bobbin holds ({fresh} lb) - a "
-                        "mid-roll same-batch splice will be required.")
-            if fresh - cumulative + _TOL < lb_per_bobbin:
-                swap_before = True
-                swap_count += 1
-                cumulative = lb_per_bobbin
-            else:
-                cumulative += lb_per_bobbin
-        else:
-            cumulative += lb_per_bobbin
-
-        if swap_before:
-            fresh_consumed += bobbins  # the roll's full set hangs fresh
-        elif bobbins > running_max_bobbins:
-            fresh_consumed += bobbins - running_max_bobbins
-        running_max_bobbins = max(running_max_bobbins, bobbins)
-
-        lot = roll.get("navision_lot")
-        rows.append({
+        if fresh is not None and lb_per_bobbin > fresh + _TOL:
+            lot = roll.get("navision_lot")
+            if ("over", lot) not in warned_lots:
+                warned_lots.add(("over", lot))
+                warnings.append(
+                    f"Bobbin usage: roll {lot} needs {lb_per_bobbin:.3f} "
+                    f"lb per bobbin of item {item['item_number']}, more "
+                    f"than a fresh bobbin holds ({fresh} lb) - a "
+                    "mid-roll same-batch splice will be required.")
+        steps.append({
             "position": position,
-            "navision_lot": str(lot) if lot is not None else None,
-            "item_width_in": _clean_number(width),
-            "bobbins_hanging": bobbins,
-            "length_lf": _clean_number(length_lf),
+            "roll": roll,
+            "length_lf": length_lf,
+            "width": width,
             "lb_per_bobbin": lb_per_bobbin,
-            "cumulative_lb_per_bobbin": cumulative,
-            "swap_before": swap_before,
+            "coverage": _coverage_intervals(roll, color_code),
         })
+
+    # The per-position ledger, one entry per depletion class: positions with
+    # an identical coverage history carry identical numbers.
+    classes = _depletion_classes([step["coverage"] for step in steps])
+    ledger = {history: {"cum": 0.0, "swaps": 0, "drawn": 0.0}
+              for history in classes}
+    fed_by_step = [[] for _ in steps]
+    for history in classes:
+        for i in history:
+            fed_by_step[i].append(history)
+
+    rows = []
+    swap_events = 0
+    for i, step in enumerate(steps):
+        lb_per_bobbin = step["lb_per_bobbin"]
+        swapped_width = 0
+        for history in fed_by_step[i]:
+            state = ledger[history]
+            if fresh is not None and fresh - state["cum"] + _TOL < lb_per_bobbin:
+                # These positions' remaining yarn cannot cover this roll:
+                # swap just their bobbins before it (zero margin).
+                state["swaps"] += 1
+                state["cum"] = 0.0
+                swapped_width += classes[history]
+            state["cum"] += lb_per_bobbin
+            state["drawn"] += lb_per_bobbin
+        swap_before = swapped_width > 0
+        if swap_before:
+            swap_events += 1
+        # The row's cumulative is the DEEPEST-drawn covered position's
+        # cumulative since its last swap - for constant-width orders every
+        # position shares one history and this equals the old single-track
+        # value.
+        deepest = max((ledger[history]["cum"] for history in fed_by_step[i]),
+                      default=lb_per_bobbin)
+
+        lot = step["roll"].get("navision_lot")
+        rows.append({
+            "position": step["position"],
+            "navision_lot": str(lot) if lot is not None else None,
+            "item_width_in": _clean_number(step["width"]),
+            "bobbins_hanging": int(round(BOBBINS_PER_INCH * step["width"])),
+            "length_lf": _clean_number(step["length_lf"]),
+            "lb_per_bobbin": lb_per_bobbin,
+            "cumulative_lb_per_bobbin": deepest,
+            "swap_before": swap_before,
+            "bobbins_swapped":
+                int(round(BOBBINS_PER_INCH * swapped_width))
+                if fresh is not None else None,
+        })
+
+    # One report entry per depletion class, deepest-drawn first. The fresh
+    # bobbins consumed per class - the initial hang plus one set per swap -
+    # is exact under the front-alignment assumption, since each class's
+    # positions are tracked individually.
+    groups = []
+    for history, class_width in classes.items():
+        state = ledger[history]
+        bobbin_count = int(round(BOBBINS_PER_INCH * class_width))
+        groups.append({
+            "width_in": _clean_number(class_width),
+            "bobbin_count": bobbin_count,
+            "rolls_fed": len(history),
+            "lb_drawn_per_bobbin": state["drawn"],
+            "swap_count": state["swaps"] if fresh is not None else None,
+            "fresh_bobbins_consumed":
+                bobbin_count * (1 + state["swaps"])
+                if fresh is not None else None,
+            "final_remaining_lb":
+                fresh - state["cum"] if fresh is not None else None,
+        })
+    groups.sort(key=lambda g: (-g["lb_drawn_per_bobbin"], -g["width_in"]))
+    deepest_group = groups[0] if groups else None
 
     return {
         "item_number": item["item_number"],
@@ -303,14 +406,25 @@ def _item_usage(item, color_code, physical_rolls, warnings):
         "weight_lb_per_sqft": weight,
         "fresh_bobbin_weight_lb": fresh,
         "rolls": rows,
+        "bobbin_groups": groups,
         "totals": {
             "rolls_with_item": len(rows),
-            "total_lb_per_bobbin": sum(r["lb_per_bobbin"] for r in rows),
-            "swap_count": swap_count if fresh is not None else None,
+            # Worst case: the deepest depletion class's total draw per
+            # bobbin over the whole order (across swaps). Equals the old
+            # single-track sum for constant-width orders.
+            "total_lb_per_bobbin":
+                deepest_group["lb_drawn_per_bobbin"] if deepest_group else 0,
+            # Swap events: rolls before which ANY position swaps.
+            "swap_count": swap_events if fresh is not None else None,
             "estimated_fresh_bobbins_consumed":
-                fresh_consumed if fresh is not None else None,
+                sum(g["fresh_bobbins_consumed"] for g in groups)
+                if fresh is not None else None,
+            # What remains on the deepest class's hanging bobbins at order
+            # end (fresh weight minus its cumulative since its last swap).
             "final_remaining_lb_per_bobbin":
-                fresh - cumulative if fresh is not None else None,
+                (deepest_group["final_remaining_lb"]
+                 if deepest_group else fresh)
+                if fresh is not None else None,
         },
     }
 
@@ -337,8 +451,11 @@ def compute_bobbin_usage(sequence_rolls, extraction, item_data):
 
     where each item entry carries the roll-by-roll usage (`position` numbers
     every physical roll of the whole expanded sequence, so it matches the run
-    sheet), a `swap_before` plan when the fresh bobbin weight is known, and
-    totals as described in the module docstring."""
+    sheet), a `swap_before` plan with per-roll `bobbins_swapped` counts when
+    the fresh bobbin weight is known, the item's depletion classes under
+    `bobbin_groups` (one entry per set of inch positions with an identical
+    coverage history, deepest-drawn first), and totals as described in the
+    module docstring."""
     if not item_data:
         return None
 
@@ -397,12 +514,15 @@ def _print_usage(label, usage):
                        if t["estimated_fresh_bobbins_consumed"] is not None
                        else "-")
         print(f"    rolls with item: {t['rolls_with_item']}   "
-              f"total lb/bobbin: {t['total_lb_per_bobbin']:.3f}   "
+              f"deepest lb/bobbin: {t['total_lb_per_bobbin']:.3f}   "
               f"swaps: {swap_text}   fresh bobbins: {bobbin_text}")
         if item["rolls"]:
             print(f"    {'pos':>5}  {'lot':<14}{'width':>7}  {'bobbins':>7}  "
                   f"{'LF':>8}  {'lb/bobbin':>10}  {'cumulative':>10}  swap")
             for row in item["rolls"]:
+                swap = ""
+                if row["swap_before"]:
+                    swap = f"SWAP {row['bobbins_swapped']}"
                 print(f"    {row['position']:>5}  "
                       f"{str(row['navision_lot']):<14}"
                       f"{row['item_width_in']:>7}  "
@@ -410,7 +530,25 @@ def _print_usage(label, usage):
                       f"{row['length_lf']:>8}  "
                       f"{row['lb_per_bobbin']:>10.4f}  "
                       f"{row['cumulative_lb_per_bobbin']:>10.4f}  "
-                      f"{'SWAP' if row['swap_before'] else ''}")
+                      f"{swap}")
+        if item["bobbin_groups"]:
+            print("    depletion groups (positions with an identical "
+                  "coverage history):")
+            print(f"    {'width':>7}  {'bobbins':>7}  {'rolls':>5}  "
+                  f"{'lb drawn':>10}  {'swaps':>5}  {'fresh':>6}  "
+                  f"{'left lb':>8}")
+            for g in item["bobbin_groups"]:
+                swaps = (str(g["swap_count"])
+                         if g["swap_count"] is not None else "-")
+                consumed = (str(g["fresh_bobbins_consumed"])
+                            if g["fresh_bobbins_consumed"] is not None
+                            else "-")
+                left = (f"{g['final_remaining_lb']:.4f}"
+                        if g["final_remaining_lb"] is not None else "-")
+                print(f"    {g['width_in']:>7}  {g['bobbin_count']:>7}  "
+                      f"{g['rolls_fed']:>5}  "
+                      f"{g['lb_drawn_per_bobbin']:>10.4f}  "
+                      f"{swaps:>5}  {consumed:>6}  {left:>8}")
     print(f"  assumptions: {usage['assumptions']}")
     for w in usage["warnings"]:
         print(f"  warning: {w}")

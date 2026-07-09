@@ -4,8 +4,11 @@ Tests for per-bobbin usage over an optimised sequence.
 
 Covers the consumption formula (lb per bobbin = w x L / 36 and its
 width-cancellation property), same-colour width summing, roll_qty expansion
-and run-sheet position numbering, swap placement against a known fresh
-bobbin weight (and the no-swap behaviour when it is unknown), the item join
+and run-sheet position numbering, the per-position ledger (depletion classes
+in `bobbin_groups`, with late-joining positions on wider rolls carrying
+their own lower depletion), swap placement against a known fresh bobbin
+weight (including partial swaps that replace only the positions that run
+short, and the no-swap behaviour when the weight is unknown), the item join
 (yarn_lbs preferred, yarn_skus fallback), and the evaluate report
 integration against the repo's real data file.
 
@@ -147,11 +150,23 @@ def test_swap_planned_before_roll_that_remaining_yarn_cannot_cover():
     assert [r["swap_before"] for r in item["rolls"]] == [False, False, True, False]
     assert [r["cumulative_lb_per_bobbin"] for r in item["rolls"]] == \
         [1.0, 2.0, 1.0, 2.0]
+    # A constant-width order: the swap replaces the roll's full set.
+    assert [r["bobbins_swapped"] for r in item["rolls"]] == [0, 0, 36, 0]
+    # One depletion class: every position is fed by all four rolls.
+    assert len(item["bobbin_groups"]) == 1
+    group = item["bobbin_groups"][0]
+    assert group["width_in"] == 12
+    assert group["bobbin_count"] == 36
+    assert group["rolls_fed"] == 4
+    assert group["lb_drawn_per_bobbin"] == 4.0
+    assert group["swap_count"] == 1
+    assert group["fresh_bobbins_consumed"] == 72
+    assert group["final_remaining_lb"] == 0.5
     t = item["totals"]
     assert t["swap_count"] == 1
     assert t["total_lb_per_bobbin"] == 4.0
     assert t["final_remaining_lb_per_bobbin"] == 0.5
-    # Uniform-position estimate: initial hang 36 + one full fresh set 36.
+    # Initial hang 36 + one full fresh set 36.
     assert t["estimated_fresh_bobbins_consumed"] == 72
 
 
@@ -176,7 +191,17 @@ def test_unknown_fresh_weight_no_swaps_and_none_totals():
     item = usage["items"][0]
     assert item["fresh_bobbin_weight_lb"] is None
     assert all(r["swap_before"] is False for r in item["rolls"])
+    assert all(r["bobbins_swapped"] is None for r in item["rolls"])
     assert item["rolls"][-1]["cumulative_lb_per_bobbin"] == 3.0
+    # The depletion groups are still reported; only the swap-dependent
+    # figures are None.
+    assert len(item["bobbin_groups"]) == 1
+    group = item["bobbin_groups"][0]
+    assert group["rolls_fed"] == 3
+    assert group["lb_drawn_per_bobbin"] == 3.0
+    assert group["swap_count"] is None
+    assert group["fresh_bobbins_consumed"] is None
+    assert group["final_remaining_lb"] is None
     t = item["totals"]
     assert t["rolls_with_item"] == 3
     assert t["total_lb_per_bobbin"] == 3.0
@@ -188,15 +213,98 @@ def test_unknown_fresh_weight_no_swaps_and_none_totals():
 def test_widening_adds_only_the_new_positions_fresh_bobbins():
     # 10" (30 bobbins), then 20" (60): the widening hangs 30 fresh bobbins on
     # the new positions; the narrower roll after it adds nothing (persisting
-    # bobbins). No swaps (fresh weight is ample).
+    # bobbins). No swaps (fresh weight is ample). Two depletion classes: the
+    # front 10" fed by all three rolls, the back 10" only by the middle one.
     rolls = [_roll("L1", ("FG", 10), ("WHI", 172), lf=100),
              _roll("L2", ("FG", 20), ("WHI", 162), lf=100),
              _roll("L3", ("FG", 10), ("WHI", 172), lf=100)]
     usage = _usage(rolls, _extraction((111, "FG")),
                    _item("111", "FG", 0.36, fresh=100.0))
-    t = usage["items"][0]["totals"]
+    item = usage["items"][0]
+    t = item["totals"]
     assert t["swap_count"] == 0
     assert t["estimated_fresh_bobbins_consumed"] == 60
+    front, back = item["bobbin_groups"]
+    assert (front["width_in"], front["rolls_fed"]) == (10, 3)
+    assert front["lb_drawn_per_bobbin"] == 3.0
+    assert (back["width_in"], back["rolls_fed"]) == (10, 1)
+    assert back["lb_drawn_per_bobbin"] == 1.0
+    # The worst case in the totals is the deepest class, not the sum of
+    # every roll's draw (the old single-track reading).
+    assert t["total_lb_per_bobbin"] == 3.0
+
+
+def test_varying_width_two_depletion_groups_177_then_182():
+    # The defect scenario: eight rolls at 177" FG then two at 182" FG,
+    # ~163 LF each, w = 0.04831. The 531 bobbins on the common 177" feed all
+    # ten rolls (10 x need drawn each); the 15 bobbins on the extra 5" hang
+    # only for the last two (2 x need each) - not the 10 x need the old
+    # single-track model implied for all 546.
+    w, lf = 0.04831, 163
+    need = w * lf / 36
+    rolls = ([_roll(f"A{i}", ("FG", 177), ("WHI", 5), lf=lf)
+              for i in range(1, 9)]
+             + [_roll(f"B{i}", ("FG", 182), lf=lf) for i in (1, 2)])
+    usage = _usage(rolls, _extraction((111, "FG")), _item("111", "FG", w))
+    item = usage["items"][0]
+    assert len(item["bobbin_groups"]) == 2
+    deep, late = item["bobbin_groups"]
+    assert (deep["width_in"], deep["bobbin_count"], deep["rolls_fed"]) == \
+        (177, 531, 10)
+    assert abs(deep["lb_drawn_per_bobbin"] - 10 * need) < 1e-9
+    assert (late["width_in"], late["bobbin_count"], late["rolls_fed"]) == \
+        (5, 15, 2)
+    assert abs(late["lb_drawn_per_bobbin"] - 2 * need) < 1e-9
+    # Fresh weight unknown: the swap-dependent group figures are None.
+    assert deep["swap_count"] is None
+    assert late["fresh_bobbins_consumed"] is None
+    # Totals carry the deepest class - the worst case.
+    assert abs(item["totals"]["total_lb_per_bobbin"] - 10 * need) < 1e-9
+    # The last two rolls' cumulative is still the deepest covered track
+    # (9 x, 10 x need), not the late positions' own 1 x, 2 x.
+    cums = [r["cumulative_lb_per_bobbin"] for r in item["rolls"]]
+    assert abs(cums[8] - 9 * need) < 1e-9
+    assert abs(cums[9] - 10 * need) < 1e-9
+
+
+def test_partial_swap_replaces_only_the_positions_that_run_short():
+    # 10", 20", 20" of FG at 1.0 lb per bobbin per roll, fresh 2.5 lb: the
+    # front 10" (30 bobbins) has drawn 2.0 lb after two rolls and cannot
+    # cover roll 3, so it swaps; the back 10" joined at roll 2, has drawn
+    # only 1.0 lb, and keeps its bobbins. The swap replaces 30 bobbins, not
+    # the 60 hanging on the roll.
+    rolls = [_roll("L1", ("FG", 10), ("WHI", 172), lf=100),
+             _roll("L2", ("FG", 20), ("WHI", 162), lf=100),
+             _roll("L3", ("FG", 20), ("WHI", 162), lf=100)]
+    usage = _usage(rolls, _extraction((111, "FG")),
+                   _item("111", "FG", 0.36, fresh=2.5))
+    item = usage["items"][0]
+    assert [r["swap_before"] for r in item["rolls"]] == [False, False, True]
+    assert [r["bobbins_swapped"] for r in item["rolls"]] == [0, 0, 30]
+    # Roll 3's cumulative is the deepest covered position AFTER the partial
+    # swap: the unswapped back 10" (2.0 lb) is now deeper than the freshly
+    # swapped front (1.0 lb).
+    assert [r["cumulative_lb_per_bobbin"] for r in item["rolls"]] == \
+        [1.0, 2.0, 2.0]
+    front, back = item["bobbin_groups"]
+    assert (front["width_in"], front["bobbin_count"], front["rolls_fed"]) == \
+        (10, 30, 3)
+    assert front["lb_drawn_per_bobbin"] == 3.0
+    assert front["swap_count"] == 1
+    assert front["fresh_bobbins_consumed"] == 60
+    assert front["final_remaining_lb"] == 1.5  # 2.5 - 1.0 since its swap
+    assert (back["width_in"], back["bobbin_count"], back["rolls_fed"]) == \
+        (10, 30, 2)
+    assert back["lb_drawn_per_bobbin"] == 2.0
+    assert back["swap_count"] == 0
+    assert back["fresh_bobbins_consumed"] == 30
+    assert back["final_remaining_lb"] == 0.5
+    t = item["totals"]
+    assert t["swap_count"] == 1
+    assert t["estimated_fresh_bobbins_consumed"] == 90
+    assert t["total_lb_per_bobbin"] == 3.0
+    # The deepest class's remaining, not the unswapped back's.
+    assert t["final_remaining_lb_per_bobbin"] == 1.5
 
 
 def test_roll_needing_more_than_a_fresh_bobbin_warns():
@@ -244,6 +352,7 @@ def test_yarn_lbs_item_with_no_carrying_roll_is_still_reported():
                    _item("111", "FG", 0.36, fresh=2.0))
     item = usage["items"][0]
     assert item["rolls"] == []
+    assert item["bobbin_groups"] == []
     t = item["totals"]
     assert t["rolls_with_item"] == 0
     assert t["total_lb_per_bobbin"] == 0
@@ -264,11 +373,14 @@ def test_items_sorted_by_item_number_and_schema_keys():
     item = usage["items"][0]
     assert set(item) == {"item_number", "yarn_type", "color",
                          "weight_lb_per_sqft", "fresh_bobbin_weight_lb",
-                         "rolls", "totals"}
+                         "rolls", "bobbin_groups", "totals"}
     assert set(item["rolls"][0]) == {
         "position", "navision_lot", "item_width_in", "bobbins_hanging",
         "length_lf", "lb_per_bobbin", "cumulative_lb_per_bobbin",
-        "swap_before"}
+        "swap_before", "bobbins_swapped"}
+    assert set(item["bobbin_groups"][0]) == {
+        "width_in", "bobbin_count", "rolls_fed", "lb_drawn_per_bobbin",
+        "swap_count", "fresh_bobbins_consumed", "final_remaining_lb"}
     assert set(item["totals"]) == {
         "rolls_with_item", "total_lb_per_bobbin", "swap_count",
         "estimated_fresh_bobbins_consumed", "final_remaining_lb_per_bobbin"}

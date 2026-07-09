@@ -354,24 +354,33 @@ length, and that inch is fed by 3 bobbins, so each bobbin supplies
 lb per bobbin = weight_lb_per_sqft × length_lf / 36
 ```
 
-— the item's width cancels out, so every bobbin of the item drains at the same
-rate regardless of how wide its segments are.
+— the item's width cancels out, so bobbins fed by the same rolls drain at the
+same rate. Because real orders vary an item's width across rolls, consumption
+is tracked per inch position from the front of the machine (layouts align at
+the front — the same fixed-creel assumption the setup cost model uses):
+positions that join late, on the extra inches of the wider rolls, carry their
+own, lower depletion instead of inheriting the full-run total.
 
 When an order's items match rows in the table, the Phase 4 report gains a
 `bobbin_usage` key and the app shows an **Item bobbin usage** section — on
 screen after the item batch requirements, and appended to the run sheet PDF.
 Per item it lists every roll the item appears on, in manufacturing order, with
-the pounds drawn per bobbin and the running cumulative. Once the item's fresh
-bobbin weight is filled in, the run sheet also plans **BOBBIN SWAP** bands
-(red, like the SETUP CHANGE bands) before any roll the remaining yarn cannot
-cover, naming how many bobbins to replace; without it, usage is still reported
-but no swaps are planned.
+the pounds drawn per bobbin and the running cumulative of the deepest-drawn
+covered position, plus a **bobbin depletion groups** table — one row per set
+of positions fed by the same rolls, with its width, bobbin count, rolls fed,
+pounds drawn per bobbin, swaps, fresh bobbins consumed, and the pounds left
+on the hanging bobbin at order end. Once the item's fresh bobbin weight is
+filled in, the run sheet also plans **BOBBIN SWAP** bands (red, like the
+SETUP CHANGE bands) before any roll that some positions' remaining yarn
+cannot cover, naming how many bobbins to replace — just the positions that
+run short, not the roll's full hanging count; without it, usage is still
+reported but no swaps are planned.
 
-The current model is deliberately simple: it assumes the item hangs at the
-same creel positions on every roll it appears on (so all of its bobbins drain
-in step), and it keeps no safety margin — a swap is flagged the moment the
-cumulative draw would exceed a fresh bobbin's weight. The report states these
-assumptions alongside the figures.
+The model's assumptions are stated alongside the figures: layouts align from
+the front of the machine (so an inch position keeps its bobbins across rolls
+and setup changes, and rolls that do not cover a position leave it
+untouched), and there is no safety margin — a position's bobbins are swapped
+the moment the next roll's draw would exceed what remains on them.
 
 ## Combined mode
 

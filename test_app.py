@@ -493,10 +493,12 @@ def _bobbin_usage_block(fresh):
     """A synthetic `bobbin_usage` block shaped exactly like the frozen Phase 4
     report contract — built by hand, never by the bobbin module, so these
     tests pin the app's rendering of the schema and nothing else. With a
-    known fresh bobbin weight the third roll's bobbins must be swapped first
-    (the cumulative draw would exceed the fresh weight); with `fresh=None`
-    the swap figures are None and no roll is flagged, exactly as the
-    contract states."""
+    known fresh bobbin weight the third roll needs a swap first (the
+    cumulative draw would exceed the fresh weight), and only the 531 bobbins
+    of the 177" depletion class run short — `bobbins_swapped` is deliberately
+    smaller than the roll's 546 hanging so the tests can tell which count the
+    renderers use. With `fresh=None` the swap figures are None and no roll is
+    flagged, exactly as the contract states."""
     known = fresh is not None
     return {
         "items": [{
@@ -509,16 +511,31 @@ def _bobbin_usage_block(fresh):
                 {"position": 1, "navision_lot": "L2", "item_width_in": 177.0,
                  "bobbins_hanging": 531, "length_lf": 95.0,
                  "lb_per_bobbin": 0.0032, "cumulative_lb_per_bobbin": 0.0032,
-                 "swap_before": False},
+                 "swap_before": False,
+                 "bobbins_swapped": 0 if known else None},
                 {"position": 2, "navision_lot": "L1", "item_width_in": 182.0,
                  "bobbins_hanging": 546, "length_lf": 120.0,
                  "lb_per_bobbin": 0.0041, "cumulative_lb_per_bobbin": 0.0073,
-                 "swap_before": False},
+                 "swap_before": False,
+                 "bobbins_swapped": 0 if known else None},
                 {"position": 3, "navision_lot": "L1", "item_width_in": 182.0,
                  "bobbins_hanging": 546, "length_lf": 120.0,
                  "lb_per_bobbin": 0.0041,
                  "cumulative_lb_per_bobbin": 0.0041 if known else 0.0114,
-                 "swap_before": known},
+                 "swap_before": known,
+                 "bobbins_swapped": 531 if known else None},
+            ],
+            "bobbin_groups": [
+                {"width_in": 177.0, "bobbin_count": 531, "rolls_fed": 3,
+                 "lb_drawn_per_bobbin": 0.0114,
+                 "swap_count": 1 if known else None,
+                 "fresh_bobbins_consumed": 1062 if known else None,
+                 "final_remaining_lb": (fresh - 0.0041) if known else None},
+                {"width_in": 5.0, "bobbin_count": 15, "rolls_fed": 2,
+                 "lb_drawn_per_bobbin": 0.0082,
+                 "swap_count": 0 if known else None,
+                 "fresh_bobbins_consumed": 15 if known else None,
+                 "final_remaining_lb": (fresh - 0.0082) if known else None},
             ],
             "totals": {
                 "rolls_with_item": 3,
@@ -529,8 +546,8 @@ def _bobbin_usage_block(fresh):
                     (fresh - 0.0041) if known else None,
             },
         }],
-        "assumptions": "Assumes the item hangs at the same creel positions "
-                       "on every roll it appears on, with no swap margin.",
+        "assumptions": "Positions align from the front of the machine, "
+                       "with no swap margin.",
         "warnings": ["Synthetic bobbin warning for the tests."],
     }
 
@@ -558,19 +575,49 @@ def test_bobbin_usage_rows_and_totals_formatting():
                        "item_width_in": "177", "bobbins_hanging": "531",
                        "lb_per_bobbin": "0.0032",
                        "cumulative_lb_per_bobbin": "0.0032",
-                       "swap_before": False}
+                       "swap_before": False, "bobbins_swapped": "0"}
     assert rows[2]["swap_before"] is True
+    # The swap replaces just the positions that run short, not the roll's
+    # full hanging count.
+    assert rows[2]["bobbins_swapped"] == "531"
+    assert rows[2]["bobbins_hanging"] == "546"
     parts = app._bobbin_usage_totals_parts(item)
     assert "rolls with this item: 3" in parts
-    assert "total drawn per bobbin: 0.0114 lb" in parts
+    assert "total drawn per bobbin (deepest position): 0.0114 lb" in parts
     assert "bobbin swaps: 1" in parts
-    assert "est. fresh bobbins consumed: 546" in parts
-    assert "left per bobbin at the end: 0.0059 lb" in parts
+    assert "fresh bobbins consumed: 546" in parts
+    assert "left per bobbin at the end (deepest position): 0.0059 lb" in parts
     # With no fresh weight the swap figures are None and drop out entirely.
     parts_none = app._bobbin_usage_totals_parts(
         _bobbin_usage_block(None)["items"][0])
     assert parts_none == ["rolls with this item: 3",
-                          "total drawn per bobbin: 0.0114 lb"]
+                          "total drawn per bobbin (deepest position): "
+                          "0.0114 lb"]
+
+
+def test_bobbin_groups_rows_formatting():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    # The depletion-groups row builder: widths lose a trailing .0, pounds get
+    # four decimals, and the swap-dependent columns render as "-" when the
+    # fresh bobbin weight is unknown.
+    groups = app._bobbin_groups_rows(_bobbin_usage_block(0.01)["items"][0])
+    assert groups[0] == {"width_in": "177", "bobbin_count": "531",
+                         "rolls_fed": "3",
+                         "lb_drawn_per_bobbin": "0.0114",
+                         "swap_count": "1",
+                         "fresh_bobbins_consumed": "1062",
+                         "final_remaining_lb": "0.0059"}
+    assert groups[1]["width_in"] == "5"
+    assert groups[1]["swap_count"] == "0"
+    groups_none = app._bobbin_groups_rows(
+        _bobbin_usage_block(None)["items"][0])
+    assert groups_none[0]["lb_drawn_per_bobbin"] == "0.0114"
+    assert groups_none[0]["swap_count"] == "-"
+    assert groups_none[0]["fresh_bobbins_consumed"] == "-"
+    assert groups_none[0]["final_remaining_lb"] == "-"
+    # An item without the key (older reports) renders no groups table.
+    assert app._bobbin_groups_rows({"rolls": []}) == []
 
 
 def test_run_sheet_pdf_bobbin_usage_section_and_swap_band():
@@ -579,8 +626,9 @@ def test_run_sheet_pdf_bobbin_usage_section_and_swap_band():
     if not _have_fpdf():
         return  # skip: fpdf2 unavailable (or its install is broken)
     # A report carrying bobbin_usage with a known fresh weight: the PDF gains
-    # the Item bobbin usage section — item metadata, the roll table, and a
-    # red BOBBIN SWAP band before the one roll flagged swap_before.
+    # the Item bobbin usage section — item metadata, the roll table, the
+    # depletion-groups table, and a red BOBBIN SWAP band before the one roll
+    # flagged swap_before.
     report = _report_with_bobbin_usage(0.01)
     content = _pdf_content(bytes(app.build_run_sheet_pdf("SAMPLE.xlsx",
                                                          report)))
@@ -590,11 +638,19 @@ def test_run_sheet_pdf_bobbin_usage_section_and_swap_band():
     assert b"0.00123" in content   # weight_lb_per_sqft, five decimals
     assert b"Fresh bobbin: 0.01 lb" in content
     assert b"0.0041" in content    # lb/bobbin, four decimals
-    assert content.count(b"BOBBIN SWAP - replace 546 bobbins") == 1
+    # The band names the bobbins actually replaced (`bobbins_swapped`, 531),
+    # not the roll's full hanging count (546).
+    assert content.count(b"BOBBIN SWAP - replace 531 bobbins") == 1
+    assert b"BOBBIN SWAP - replace 546 bobbins" not in content
     # The band is drawn in red, like the SETUP CHANGE band: the red
     # non-stroking colour operator is set just before its text.
     idx = content.index(b"BOBBIN SWAP")
     assert b"0.7843 0 0 rg" in content[max(0, idx - 400):idx]
+    # The depletion-groups table: heading, headers, and the per-group
+    # figures (1062 fresh bobbins on the deep class).
+    assert b"Bobbin depletion groups" in content
+    assert b"Rolls fed" in content
+    assert b"1062" in content
     # The totals line and the assumptions sentence both land in the PDF.
     assert b"bobbin swaps: 1" in content
     assert b"no swap margin" in content
@@ -607,7 +663,8 @@ def test_run_sheet_pdf_bobbin_usage_without_fresh_weight():
         return  # skip: fpdf2 unavailable (or its install is broken)
     # No fresh bobbin weight: the section still renders (with a note that the
     # weight is not yet filled in), but no swap can be planned — no BOBBIN
-    # SWAP band anywhere and the None swap totals drop out.
+    # SWAP band anywhere and the None swap totals drop out. The depletion
+    # groups still render, with their swap-dependent columns dashed.
     report = _report_with_bobbin_usage(None)
     content = _pdf_content(bytes(app.build_run_sheet_pdf("SAMPLE.xlsx",
                                                          report)))
@@ -616,6 +673,8 @@ def test_run_sheet_pdf_bobbin_usage_without_fresh_weight():
     assert b"BOBBIN SWAP" not in content
     assert b"bobbin swaps" not in content
     assert b"rolls with this item: 3" in content
+    assert b"Bobbin depletion groups" in content
+    assert b"1062" not in content  # fresh bobbins per group is unknown
 
 
 def test_run_sheet_pdf_without_bobbin_usage_key_unchanged():
@@ -635,6 +694,7 @@ def test_run_sheet_pdf_without_bobbin_usage_key_unchanged():
     content = _pdf_content(bytes(pdf))
     assert b"Item bobbin usage" not in content
     assert b"BOBBIN SWAP" not in content
+    assert b"Bobbin depletion groups" not in content
 
 
 # The render harness with a frozen-contract bobbin_usage block injected into
@@ -662,18 +722,28 @@ report["bobbin_usage"] = {
                           "item_width_in": 182.0, "bobbins_hanging": 546,
                           "length_lf": 120.0, "lb_per_bobbin": 0.0041,
                           "cumulative_lb_per_bobbin": 0.0041,
-                          "swap_before": False},
+                          "swap_before": False, "bobbins_swapped": 0},
                          {"position": 2, "navision_lot": "L2",
                           "item_width_in": 177.0, "bobbins_hanging": 531,
                           "length_lf": 95.0, "lb_per_bobbin": 0.0032,
                           "cumulative_lb_per_bobbin": 0.0032,
-                          "swap_before": True}],
+                          "swap_before": True, "bobbins_swapped": 531}],
+               "bobbin_groups": [
+                   {"width_in": 177.0, "bobbin_count": 531, "rolls_fed": 2,
+                    "lb_drawn_per_bobbin": 0.0073, "swap_count": 1,
+                    "fresh_bobbins_consumed": 1062,
+                    "final_remaining_lb": 0.0018},
+                   {"width_in": 5.0, "bobbin_count": 15, "rolls_fed": 1,
+                    "lb_drawn_per_bobbin": 0.0041, "swap_count": 0,
+                    "fresh_bobbins_consumed": 15,
+                    "final_remaining_lb": 0.0009}],
                "totals": {"rolls_with_item": 2,
                           "total_lb_per_bobbin": 0.0073,
                           "swap_count": 1,
                           "estimated_fresh_bobbins_consumed": 531,
                           "final_remaining_lb_per_bobbin": 0.0018}}],
-    "assumptions": "Assumes uniform creel positions and no swap margin.",
+    "assumptions": "Positions align from the front of the machine, "
+                   "with no swap margin.",
     "warnings": ["Synthetic bobbin warning for the tests."]}
 app._render_report(st, "SAMPLE.xlsx", {"source_file": "SAMPLE.xlsx"}, report)
 """
@@ -696,6 +766,12 @@ def test_render_report_shows_item_bobbin_usage():
     assert "| 531 |" in table
     assert "0.0041" in table
     assert table.count("SWAP") == 1
+    # The depletion-groups table: one row per class, swap-dependent columns
+    # filled in (fresh weight known).
+    assert any("Bobbin depletion groups" in v for v in markdown)
+    groups_table = next(v for v in markdown if "| Width (in) |" in v)
+    assert "| 177 |" in groups_table and "| 1062 |" in groups_table
+    assert "| 5 |" in groups_table and "| 15 |" in groups_table
     # The totals line and the caption-text assumptions sentence.
     assert any("bobbin swaps: 1" in v for v in markdown)
     assert any("no swap margin" in c.value for c in at.caption)
