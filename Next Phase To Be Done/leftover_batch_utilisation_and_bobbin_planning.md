@@ -66,45 +66,116 @@ off either way. Layout signatures in combined mode must incorporate batch
 identity. Batch assignment and cross-order sequencing are therefore coupled:
 shared batches are what create the zero-cost seams between orders.
 
-### 3.2 Tiered per-inch costs
+### 3.2 Cost simplification: bobbins changed (pending floor confirmation)
 
-For a transition from roll A to roll B, classify every mismatched inch of B
-by where its bobbins come from:
-
-- **Zero cost** — same (item, batch) at the same position.
-- **c_move** — the (item, batch) B needs is on the creel elsewhere in A's
-  layout. Bobbins are repositioned: cut the yarn, move the bobbin, tie the
-  new bobbin's yarn to the existing yarn feeding the tufter.
-- **c_new** — the (item, batch) is not on the creel (or not in sufficient
-  width). Bobbins must be fetched from inventory and mounted.
-- Optionally **c_remove** — inches of A that leave the creel entirely,
-  covering takedown and placing the bobbin on a storage rack for inventory
-  or for another tufter (if planning assigned the same batch there).
+A tiered cost model (separate rates for moving a hanging bobbin vs
+fetching and mounting a new one, plus takedown) was considered and set
+aside. The working position from planning discussion is that **moving an
+existing bobbin to another creel location costs the same as removing the
+old bobbin and mounting a new one** — either way the yarn is cut and the
+new bobbin's yarn is tied to the yarn feeding the tufter. Under that
+equality the tiers collapse and the cost of a transition is simply the
+number of bobbins changed:
 
 ```
-cost(A → B) = c_move × inches_moved + c_new × inches_new (+ c_remove × inches_removed)
+cost(A → B) = bobbins changed = 3 × mismatched inches, on (item, batch) identity
 ```
 
-Per-pair computation: positions matching exactly are free; for the rest,
-match B's remaining demand per (item, batch) against A's remaining supply of
-the same (item, batch) — matched inches are moves, unmatched demand is new,
-unmatched supply is removal. The current model is the special case
-c_move = c_new with batch ignored, so this is a strict generalisation.
+This is exactly the existing Phase 1 cost model with two adjustments, only
+one of which is substantive:
 
-Notes:
+- identity is (item, batch) instead of colour;
+- the ×3 is a constant scale factor — it changes time estimates but never
+  which sequence wins, so the optimiser can keep working in inches.
 
-- Only the **ratio** c_move : c_new matters for sequencing decisions, not
-  absolute times. A rough time study or the floor's own estimate is enough
-  to start.
-- If c_new ≠ c_remove the cost becomes **asymmetric** (A→B ≠ B→A), turning
-  the problem from symmetric TSP into asymmetric TSP. Held–Karp handles
-  this unchanged; 2-opt needs adaptation. Starting point: set c_remove = 0
-  and confirm with the floor whether takedown time is material.
-- **Kitting lever:** if new bobbins are fetched in advance during the
-  current run and staged creel-side, c_new collapses toward mount-only and
-  the ratio compresses. Whether this already happens informally is a data
-  question (§7). If it does, the value of batch sharing shifts from time
-  saved toward material waste avoided.
+Everything already built survives verbatim: the distance matrix, Held–Karp,
+2-opt/Or-opt, symmetry (no asymmetric TSP), and the MST lower bound.
+Combined mode needs only batch-aware layout signatures.
+
+Two assumptions carry this simplification and must be verified with the
+floor (they are questions 1–3 and 13 in §9):
+
+1. **Move ≈ remove-plus-mount in time.** If moving turns out much faster,
+   the tiered model returns.
+2. **No material fixed overhead per stop** beyond the bobbin work itself
+   (restart, re-tension, quality check). See §3.3 for what happens if this
+   fails.
+
+### 3.3 Objective: long manufacturing runs
+
+The stated business objective (CEO direction) is that tufting should be a
+long-running process: minimise the number of stops, so runs between creel
+changes are as long as possible.
+
+A structural fact shapes where this can be won. **Within a single order,
+stop count is invariant**: once identical layouts are clustered (which the
+sequencer already does), every sequence has exactly (distinct layouts − 1)
+stops. Sequencing inside an order reduces how many bobbins each stop
+changes, never how many stops there are. Long runs are therefore won at
+the **pool level**:
+
+- batch sharing plus positional layout alignment creating zero-change
+  seams between orders (§ below), and
+- longer term, the amount of layout commonality in the order book itself —
+  set upstream by field design, which scheduling can only harvest, not
+  create.
+
+Model implication: if the floor confirms a stop carries fixed overhead
+beyond the bobbin changes, add a fixed penalty to every non-zero-cost
+transition:
+
+```
+cost = STOP_PENALTY (if any mismatch) + bobbins changed
+```
+
+This preserves the TSP structure (a constant added to nonzero edges).
+Within an order it adds a constant total and changes nothing; across
+orders it makes the solver prefer perfect-alignment seams first and bobbin
+savings second — the lexicographic "stops, then bobbins" objective. If the
+floor reports no fixed overhead, the plan doc's original
+no-stoppage-penalty assumption extends across orders unchanged.
+
+Reporting implication: evaluation should report the **run-length
+distribution** (linear feet between stops) and stop count alongside the
+existing inch/bobbin cost, since run length is the quantity the business
+objective is stated in.
+
+### 3.4 Where batch sharing pays: aligned seams
+
+At a seam between orders the saving is binary before it is linear. If the
+shared item sits at the **same creel positions** in both orders' rolls and
+comes from the shared batch, the seam costs zero and the machine keeps
+running — the actual prize. Any mismatch means a stop regardless; sharing
+then only reduces the number of bobbins changed at that stop.
+
+Sharing a batch between two orders therefore only makes sense when their
+roll layouts align positionally (or overlap substantially — a long common
+stretch such as 177" of field green at identical positions stays untouched
+even if 5" at the edge changes). The pairing metric is the **best seam
+cost**: the cheapest transition between any roll of order A and any roll of
+order B under shared-batch identity — the sequencer is free to end A and
+start B on exactly those rolls, so this is precisely the saving on offer.
+
+Candidate pairs are found by cheap filters, each using data the extractor
+already produces:
+
+1. **Spec compatibility** — same product, gauge, pile height.
+2. **Layout alignment** — shared layout signatures, or low positional
+   mismatch between the best roll pair.
+3. **Batch feasibility** — for the items at the aligned positions: lbs
+   with margin, full-bobbin count, and the per-bobbin demand check (§6).
+
+Only pairs surviving all three become sharing candidates; everything else
+keeps its own batch. Pairing couples order B's schedule to order A's
+completion, so the pair list is re-confirmed at each planning cycle rather
+than standing indefinitely.
+
+Notes retained from the tiered-model discussion, still relevant:
+
+- **Kitting** (fetching new bobbins in advance and staging them
+  creel-side) no longer affects sequencing under the simplified model, but
+  still matters for absolute changeover-time predictions. Whether it
+  already happens informally is a data question (§9).
 - If several people work a creel change in parallel, wall-clock changeover
   is not linear in bobbin count; the additive model predicts labour
   (person-minutes), not downtime directly. To be validated against a few
@@ -259,16 +330,21 @@ and c_new directly.
 12. Batch data shape from Business Central: per batch — item number, batch
     id, available lb, bobbin count, receipt date; whether bobbin count is
     tracked per batch; export vs live query, and refresh frequency.
+13. When the machine stops for a creel change, is there fixed time lost
+    beyond the bobbin changes themselves (restart, re-tension, quality
+    check)? This decides whether a per-stop penalty is added to the cost
+    model (§3.3).
 
-Priority if limited: items 1–3 (the c_move : c_new ratio) and item 11
-(leftover accuracy) — the first makes the cost model concrete, the second
-is the go/no-go evidence for planned sharing.
+Priority if limited: items 1–3 and 13 (they verify the two assumptions the
+simplified cost model rests on, §3.2) and item 11 (leftover accuracy, the
+go/no-go evidence for planned sharing).
 
 ## 10. Open questions
 
 1. Length of the frozen planning window.
-2. Calibrated values (or ratio) for c_move, c_new, c_remove; whether
-   asymmetry (c_remove > 0) must be modelled.
+2. Floor confirmation of the two assumptions behind the simplified cost
+   model (§3.2): move ≈ remove-plus-mount timing, and whether a stop
+   carries fixed overhead requiring the per-stop penalty (§3.3).
 3. The assignment objective when several feasible sharings exist: creel
    changes saved vs batch fragmentation vs discarded-partial waste
    (sharpens open question 2 of `docs/batch_assignment_context.md` §7).
