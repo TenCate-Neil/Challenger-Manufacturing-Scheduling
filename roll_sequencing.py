@@ -236,6 +236,73 @@ def load_rolls(extracted):
 _JOINED_SUMMARY_FIELDS = ("mfg_rolls", "mfg_lf", "mfg_sf")
 
 
+def _join_yarn_lbs(names, blocks, warnings):
+    """Merge the inputs' per-file `yarn_lbs` blocks into one combined block
+    for a joined order. Mirrors the mfg_summary philosophy: the block is
+    carried only when EVERY input states one — a partial merge would
+    understate an item's pounds rather than catch a real shortfall — so any
+    input lacking it means None, plus a warning naming the files that lack
+    it.
+
+    Colour entries are grouped by (yarn_type, color_code, sku), with
+    `lbs_needed` summed across the files (max widths, and hence bobbin
+    counts, come from the combined rolls downstream, not from this block).
+    Yarn rows are keyed by `yarn_type` in first-seen order; a row's
+    `yarn_position` is kept when every source stating that row agrees on it,
+    else None. Colours keep first-seen order within their row. The same
+    (yarn_type, colour) under different SKUs across files stays as separate
+    entries, with a warning — that means the workbooks number the item
+    inconsistently, which batch planning must see rather than have silently
+    merged away."""
+    if not blocks:
+        return None  # no inputs: nothing to merge, and nothing to warn about
+    missing = [name for name, block in zip(names, blocks) if block is None]
+    if missing:
+        warnings.append(
+            "Combined yarn lbs: no 'yarn_lbs' block in " + ", ".join(missing)
+            + " - the block is carried only when every input states one, so "
+              "the combined order has none (no item requirements).")
+        return None
+
+    rows = []      # combined yarn rows, yarn_type first-seen order
+    by_type = {}   # yarn_type -> its combined row
+    entries = {}   # (yarn_type, color_code, sku) -> its colour entry
+    for block in blocks:
+        for yarn in block:
+            yarn_type = yarn.get("yarn_type")
+            row = by_type.get(yarn_type)
+            if row is None:
+                row = {"yarn_position": yarn.get("yarn_position"),
+                       "yarn_type": yarn_type, "colors": []}
+                by_type[yarn_type] = row
+                rows.append(row)
+            elif row["yarn_position"] != yarn.get("yarn_position"):
+                row["yarn_position"] = None
+            for color in yarn.get("colors") or []:
+                key = (yarn_type, color.get("color_code"), color.get("sku"))
+                entry = entries.get(key)
+                if entry is None:
+                    for other in entries:
+                        if other[:2] == key[:2]:
+                            warnings.append(
+                                f"Combined yarn lbs: {yarn_type} colour "
+                                f"{key[1]} appears under different SKUs "
+                                f"across files ({other[2]!r} vs {key[2]!r}) "
+                                "- kept as separate items; the workbooks' "
+                                "item numbering disagrees.")
+                    entry = dict(color)
+                    entries[key] = entry
+                    row["colors"].append(entry)
+                else:
+                    lbs = (entry.get("lbs_needed"), color.get("lbs_needed"))
+                    entry["lbs_needed"] = (
+                        _clean_number(sum(lbs))
+                        if all(isinstance(v, (int, float))
+                               and not isinstance(v, bool) for v in lbs)
+                        else None)
+    return rows
+
+
 def join_orders(extractions):
     """Join several extraction results into one combined order.
 
@@ -270,18 +337,27 @@ def join_orders(extractions):
         against the combined stated totals. A field is summed only when every
         input states it numerically; otherwise it is None — a partial sum
         would raise a spurious mismatch rather than catch a real one;
+      - `yarn_lbs`: the inputs' per-item yarn pounds blocks merged into one
+        (colour entries grouped by yarn type, colour and SKU, pounds
+        summed), present only when every input carries one — omitted, with a
+        warning naming the files that lack it, otherwise. See
+        `_join_yarn_lbs` for the merge rules. Carrying the block means
+        combined-mode reports get per-item batch requirements from
+        `evaluate`, with the max widths coming from the combined rolls;
       - `warnings`: the inputs' extraction warnings, prefixed with their
         source file."""
     names = []
     rolls = []
     warnings = []
     summaries = []
+    yarn_blocks = []
 
     for index, extracted in enumerate(extractions):
         po = None
         if isinstance(extracted, dict):
             name = str(extracted.get("source_file") or f"order {index + 1}")
             summaries.append(extracted.get("mfg_summary"))
+            yarn_blocks.append(extracted.get("yarn_lbs"))
             warnings.extend(f"{name}: {w}" for w in extracted.get("warnings", []))
             info = extracted.get("general_information")
             if isinstance(info, dict):
@@ -289,6 +365,7 @@ def join_orders(extractions):
         else:
             name = f"order {index + 1}"
             summaries.append(None)
+            yarn_blocks.append(None)
         names.append(name)
         rolls.extend(
             dict(roll, source_file=name, layout_group=None,
@@ -307,12 +384,17 @@ def join_orders(extractions):
         else:
             summary[field] = None
 
+    yarn_lbs = _join_yarn_lbs(names, yarn_blocks, warnings)
+
     return {
         "source_file": " + ".join(names),
         "source_files": names,
         "rolls": rolls,
         "roll_count": len(rolls),
         "mfg_summary": summary,
+        # Only present when every input stated a yarn_lbs block; omitted (not
+        # empty) otherwise, so downstream sees the block as absent.
+        **({"yarn_lbs": yarn_lbs} if yarn_lbs is not None else {}),
         "warnings": warnings,
     }
 

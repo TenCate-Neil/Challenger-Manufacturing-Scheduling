@@ -35,6 +35,7 @@ from evaluate import (
     report_json,
 )
 from extract_turf_layout import TemplateMismatch, extract_workbook
+from item_requirements import BOBBINS_PER_INCH
 from roll_sequencing import (
     _clean_number,
     join_orders,
@@ -298,6 +299,85 @@ def _render_distinct_layouts(st, layouts):
             right=f'{count}&times; {noun}',
             right_strong=True))
     box.markdown('<div>' + "".join(rows) + '</div>', unsafe_allow_html=True)
+
+
+def _item_requirement_rows(items):
+    """The Item batch requirements table's body cells as display strings, one
+    dict per item (report `item_requirements` entries): pounds with one
+    decimal and a thousands separator, the max width with any trailing .0
+    trimmed, and the colour shown by name where the workbook gives one that
+    differs from the code. SKUs pass through as-is — "145190A" stays a
+    string. No Streamlit — the testable core of
+    `_render_item_requirements`."""
+    rows = []
+    for item in items:
+        code = item.get("color_code")
+        name = item.get("color_name")
+        colour = name if name not in (None, "") and str(name) != str(code) \
+            else code
+        lbs = item.get("lbs_needed")
+        lbs_text = (f"{lbs:,.1f}"
+                    if isinstance(lbs, (int, float))
+                    and not isinstance(lbs, bool) else "-")
+        width = item.get("max_width_in")
+        width_text = (f"{_clean_number(width)}"
+                      if isinstance(width, (int, float))
+                      and not isinstance(width, bool) else "-")
+        rows.append({
+            "item_number": str(item.get("item_number")),
+            "yarn_type": str(item.get("yarn_type")),
+            "colour": str(colour),
+            "lbs_needed": lbs_text,
+            "max_width_in": width_text,
+            "bobbins_required": str(item.get("bobbins_required")),
+        })
+    return rows
+
+
+def _render_item_requirements(st, extraction, report):
+    """Per-item batch requirements: one row per yarn type + colour item, with
+    the pounds and bobbins a single inventory batch must cover. Rendered only
+    when the report carries the `item_requirements` key (the extraction
+    stated a yarn lbs block); when the key is absent this renders nothing at
+    all, so older extractions keep their existing report."""
+    if "item_requirements" not in report:
+        return
+    box = st.container(border=True)
+    box.markdown("#### Item batch requirements")
+
+    items = report["item_requirements"]
+    if not items:
+        box.caption("No item requirements were found in the workbook's "
+                    "yarn lbs block.")
+        return
+
+    def cell(text):
+        # A literal "|" in a value would split the markdown table cell.
+        return str(text).replace("|", "\\|")
+
+    lines = [
+        "| Item # | Yarn type | Colour | Lbs needed | Max width (in) "
+        "| Bobbins needed |",
+        "| --- | --- | --- | ---: | ---: | ---: |",
+    ]
+    for row in _item_requirement_rows(items):
+        lines.append(
+            f"| {cell(row['item_number'])} | {cell(row['yarn_type'])} "
+            f"| {cell(row['colour'])} | {row['lbs_needed']} "
+            f"| {row['max_width_in']} | {row['bobbins_required']} |")
+    box.markdown("\n".join(lines))
+
+    box.caption(
+        "Each item (yarn type + colour = item number) must be covered by a "
+        "single inventory batch holding at least these pounds and bobbins; "
+        "bobbins = the max total width of the item's colour in any one roll "
+        f"× {BOBBINS_PER_INCH} per inch. Roll length drives the pounds, "
+        "not the bobbins.")
+    if isinstance(extraction, dict) and "source_files" in extraction:
+        box.caption(
+            "Combined order: the pounds are summed across the input files, "
+            "and the max width is taken across all rolls of the combined "
+            "run.")
 
 
 def _render_combined_order(st, sequence):
@@ -740,6 +820,10 @@ def _render_report(st, filename, extraction, report, download_stem=None):
     # Distinct layouts (Step 2) — sits just above Solution quality.
     _render_distinct_layouts(st, report["layouts"])
 
+    # Item batch requirements — only when the workbook stated a yarn lbs
+    # block (the report key is omitted otherwise).
+    _render_item_requirements(st, extraction, report)
+
     # Solution quality.
     qbox = st.container(border=True)
     qbox.markdown("#### Solution quality")
@@ -803,10 +887,16 @@ def _render_report(st, filename, extraction, report, download_stem=None):
     )
 
     # The printable run sheet needs fpdf2; where it is unavailable, fall back to
-    # a note rather than erroring so the rest of the report still works.
+    # a note rather than erroring so the rest of the report still works. The
+    # guard catches BaseException (re-raising the control-flow exceptions)
+    # because a broken fpdf2/cryptography install can fail its import with a
+    # BaseException-derived pyo3_runtime.PanicException, which would otherwise
+    # escape and take the whole report down.
     try:
         pdf_bytes = build_run_sheet_pdf(filename, report)
-    except Exception as exc:  # noqa: BLE001
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:  # noqa: BLE001
         downloads[1].caption(
             "Run sheet PDF needs fpdf2 — run `pip install fpdf2` to enable it "
             f"({exc}).")

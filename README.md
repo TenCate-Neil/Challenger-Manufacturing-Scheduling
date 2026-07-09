@@ -25,6 +25,10 @@ One JSON file is written per input workbook.
   and truck counts (LTL/FTL).
 - **Yarn SKUs** (rows 671-676): each active creel position, its yarn type,
   and every color that yarn is available in with its SKU.
+- **Yarn lbs** (rows 638-647, the `Yarn SKUs & Total Lbs. Needed` block): per
+  yarn type and colour, the item/SKU number and the total pounds of that yarn
+  the order requires, as already calculated inside the workbook. Emitted as
+  `yarn_lbs`; this is the demand side of batch assignment (see below).
 - **Roll layout** (row 684 onward, until the `Creel Change` marker): one
   entry per roll — lot number, panel numbers, quantity, length, and the
   left-to-right width/color segment layout across the 182" roll. Rolls that
@@ -297,6 +301,41 @@ python test_app.py                 # standalone runner
 pytest test_app.py                 # if pytest is installed
 ```
 
+## Item batch requirements
+
+`item_requirements.py` computes, per item (a yarn type + colour combination,
+identified by its item/SKU number), what an inventory batch must cover for an
+order. The rules are recorded in `docs/batch_assignment_context.md`; a single
+batch must satisfy both figures, and an item is never split across two batches
+within an order:
+
+- **Pounds needed**: taken directly from the workbook's `Yarn SKUs & Total
+  Lbs. Needed` block (rows 638-647), extracted as `yarn_lbs` — not recomputed.
+- **Bobbins needed**: `ceil(max width × 3)`, where max width is the largest
+  total width in inches of that item's colour within any single roll of the
+  order. Same-colour segments in one roll are summed (5" + 5" needs the full
+  10" covered); roll length and quantity play no part — length drives pounds,
+  width drives bobbins.
+
+`item_requirements(extraction)` returns one entry per item with the item
+number, yarn type, colour, pounds, max width, and bobbins. When an extraction
+carries `yarn_lbs`, the Phase 4 report gains an `item_requirements` key and
+the app shows an **Item batch requirements** table after the distinct
+layouts. Colours that appear on one side only (in the lbs block but never in
+a roll, or the reverse) are reported as warnings rather than dropped
+silently.
+
+```bash
+python item_requirements.py EXTRACTED.json [EXTRACTED2.json ...]
+```
+
+Tests:
+
+```bash
+python test_item_requirements.py  # standalone runner
+pytest test_item_requirements.py  # if pytest is installed
+```
+
 ## Combined mode
 
 Several orders can be joined and sequenced as one combined run.
@@ -309,7 +348,11 @@ are globally unique across files, so conservation carries over unchanged. The
 combined `mfg_summary` sums `mfg_rolls` / `mfg_lf` / `mfg_sf` across the
 inputs, and Phase 4's cross-check compares those summed stated totals against
 the combined sequence — the same second-source conservation check as for a
-single file.
+single file. When every input carries a `yarn_lbs` block those are merged too
+— pounds summed per item, max width taken across all combined rolls — so a
+combined report includes item batch requirements for the whole run; if any
+input lacks the block, the key is omitted with a warning, and an item number
+disagreement between files for the same yarn/colour is also warned about.
 
 ```bash
 python evaluate.py A.json B.json --combine        # one combined report

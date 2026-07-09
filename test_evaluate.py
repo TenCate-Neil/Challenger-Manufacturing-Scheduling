@@ -334,6 +334,59 @@ def test_cross_check_catches_wrong_physical_roll_count():
     assert any("physical roll" in w for w in report["warnings"])
 
 
+# --- per-item batch requirements in the report ------------------------------
+def test_evaluate_includes_item_requirements_when_yarn_lbs_present():
+    rolls = _sample_rolls()  # FG max width 182, WHI max width 82
+    extraction = {
+        "source_file": "S.xlsx",
+        "rolls": rolls,
+        "yarn_lbs": [{
+            "yarn_position": "Y1", "yarn_type": "T",
+            "colors": [
+                {"color_code": "FG", "color_name": "Field Green",
+                 "sku": 111, "lbs_needed": 10.0},
+                {"color_code": "WHI", "color_name": "White",
+                 "sku": 222, "lbs_needed": 2.0},
+            ],
+        }],
+    }
+    report = ev.evaluate(rolls, extraction=extraction)
+    items = report["item_requirements"]
+    assert [i["item_number"] for i in items] == [111, 222]
+    assert items[0]["bobbins_required"] == 182 * 3
+    assert items[1]["bobbins_required"] == 82 * 3
+    # The report must remain JSON-serialisable with the new key present.
+    reparsed = json.loads(ev.report_json(report))
+    assert reparsed["item_requirements"] == items
+
+
+def test_evaluate_item_warnings_reach_the_report():
+    # A colour priced in the yarn_lbs block but tufted in no roll: the item
+    # warning must land in the report's warnings like every other warning.
+    rolls = _sample_rolls()
+    extraction = {
+        "source_file": "S.xlsx",
+        "rolls": rolls,
+        "yarn_lbs": [{
+            "yarn_position": "Y1", "yarn_type": "T",
+            "colors": [{"color_code": "BLK", "color_name": "Black",
+                        "sku": 333, "lbs_needed": 1.0}],
+        }],
+    }
+    report = ev.evaluate(rolls, extraction=extraction)
+    assert report["item_requirements"][0]["bobbins_required"] == 0
+    assert any("BLK" in w for w in report["warnings"])
+
+
+def test_evaluate_omits_item_requirements_without_yarn_lbs():
+    # No extraction at all, and an extraction lacking the yarn_lbs block:
+    # in both cases the key is absent entirely, not an empty list.
+    assert "item_requirements" not in ev.evaluate(_sample_rolls())
+    report = ev.evaluate(_sample_rolls(),
+                         extraction={"source_file": "S.xlsx"})
+    assert "item_requirements" not in report
+
+
 def _run_standalone():
     tests = [v for name, v in sorted(globals().items())
              if name.startswith("test_") and callable(v)]

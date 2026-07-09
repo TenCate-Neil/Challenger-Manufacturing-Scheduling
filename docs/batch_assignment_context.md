@@ -127,10 +127,14 @@ open orders to assigned batches.
    is "one batch per item" enforced per original order or across the whole
    combined run?
 
-## 8. Likely first step
+## 8. First step — implemented
 
-A per-item demand calculator computed straight from an extraction: item
-number, yarn type, colour, total square feet, required lb (extracted from
-rows 638–645), and required bobbins (max total width × 3). Planners can
-sanity-check its output against their current manual process before any
-batch-assignment automation is built on top.
+The per-item demand calculator is implemented: `item_requirements.py`
+computes, per item, the item number, yarn type, colour, required lb
+(extracted from the workbook's rows 638–647 block, not recomputed) and
+required bobbins (max total colour width in any roll × 3, same-colour
+segments summed within a roll). It is shown as the **Item batch
+requirements** table in the web app and carried in the Phase 4 JSON report,
+including for combined runs (lb summed across files, max width across all
+combined rolls). Planners can sanity-check its output against their current
+manual process before any batch-assignment automation is built on top.
