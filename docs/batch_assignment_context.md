@@ -89,16 +89,45 @@ footage and the per-item maximum width are properties of the order as a set
 of rolls, unchanged by the manufacturing order. The existing optimisation
 pipeline is unaffected.
 
-## 6. Open questions for the implementation phase
+## 6. Planned phase: order pool and automated assignment
 
-1. **Batch inventory data source.** Which batches exist per item, and each
-   batch's available lb and bobbin count, are not in the order workbook.
-   Where does this come from (e.g. a Navision export), and in what format?
-2. **Combined mode semantics.** When several orders are joined into one run,
+The intended next phase moves from one workbook at a time to the full set of
+open orders, so that batch assignment is computed across all of them at once
+instead of planners opening documents and doing the calculations by hand.
+
+Two inputs feed it:
+
+1. **Order pool.** All open-order Excel workbooks live in one shared,
+   centralized place — a local folder, OneDrive, SharePoint, or similar. The
+   existing extractor runs over every workbook in the pool.
+2. **Batch availability from Business Central.** The batches currently in
+   inventory per item, with each batch's available lb and bobbin count —
+   either via a live connection to Business Central or a recurring export
+   from it.
+
+With both sides known, the system computes each open order's per-item
+requirements (required lb and required bobbins, per sections 4.1 and 4.2)
+and **optimally assigns available batches to the items within the open
+orders**, respecting the one-batch-per-item-per-order rule and both capacity
+constraints. The goal is to automate the current manual procedure end to
+end: no opening documents, no hand calculations, and a faster path from
+open orders to assigned batches.
+
+## 7. Open questions for the implementation phase
+
+1. **Batch data shape.** Whether the Business Central side is a live
+   connection or an export, and the exact fields available per batch
+   (item number, batch id, available lb, bobbin count), is still to be
+   decided.
+2. **Assignment objective.** "Optimally assign" needs a defined objective
+   when several feasible assignments exist — e.g. minimise leftover batch
+   remnants, preserve large batches for large orders, or first-fit by ship
+   date. To be agreed with the planners.
+3. **Combined mode semantics.** When several orders are joined into one run,
    is "one batch per item" enforced per original order or across the whole
    combined run?
 
-## 7. Likely first step
+## 8. Likely first step
 
 A per-item demand calculator computed straight from an extraction: item
 number, yarn type, colour, total square feet, required lb (extracted from
