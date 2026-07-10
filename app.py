@@ -28,6 +28,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from batch_ledger import DEFAULT_BUFFER_RATIO, load_batch_workbook
 from evaluate import (
     DEFAULT_EXACT_MAX_LAYOUTS,
     DEFAULT_EXACT_ORACLE_MAX_LAYOUTS,
@@ -77,34 +78,42 @@ def _extract_upload(filename, file_bytes):
 
 def analyse_upload(filename, file_bytes,
                    exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
-                   oracle_max_layouts=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS):
+                   oracle_max_layouts=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS,
+                   batches=None, buffer_ratio=DEFAULT_BUFFER_RATIO):
     """Run the full pipeline on one uploaded workbook's bytes.
 
     Extracts via `_extract_upload` (see there for the temp-file rationale),
-    then evaluates. Returns `(extraction, report)`: the raw extraction dict
-    from `extract_turf_layout` and the Phase 4 evaluation report from
-    `evaluate`. Raises `TemplateMismatch` if the workbook is not a recognised
-    FIELD LAYOUT order."""
+    then evaluates. `batches` is an optional `load_batch_workbook` result;
+    when given, the report gains the `batch_ledger` key simulated with the
+    `buffer_ratio` planning margin. Returns `(extraction, report)`: the raw
+    extraction dict from `extract_turf_layout` and the Phase 4 evaluation
+    report from `evaluate`. Raises `TemplateMismatch` if the workbook is not
+    a recognised FIELD LAYOUT order."""
     extraction = _extract_upload(filename, file_bytes)
     report = evaluate(
         extraction.get("rolls", []),
         exact_max_layouts=exact_max_layouts,
         oracle_max_layouts=oracle_max_layouts,
         extraction=extraction,
+        batches=batches,
+        buffer_ratio=buffer_ratio,
     )
     return extraction, report
 
 
 def evaluate_combined(extractions,
                       exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
-                      oracle_max_layouts=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS):
+                      oracle_max_layouts=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS,
+                      batches=None, buffer_ratio=DEFAULT_BUFFER_RATIO):
     """Join several extracted orders into one and evaluate them together.
 
     `join_orders` concatenates the rolls (each tagged with its source file,
     so the combined sequence stays traceable to its workbook) and sums the
     stated MFG totals, so `evaluate`'s cross-check compares the combined
     sequence against the combined stated totals rather than any single
-    file's. Returns `(combined, report)`: the joined extraction-shaped dict
+    file's. `batches` / `buffer_ratio` behave as in `analyse_upload`; note
+    that in combined mode one batch serves an item across the whole combined
+    run. Returns `(combined, report)`: the joined extraction-shaped dict
     and the evaluation report over all rolls at once."""
     combined = join_orders(extractions)
     report = evaluate(
@@ -112,13 +121,16 @@ def evaluate_combined(extractions,
         exact_max_layouts=exact_max_layouts,
         oracle_max_layouts=oracle_max_layouts,
         extraction=combined,
+        batches=batches,
+        buffer_ratio=buffer_ratio,
     )
     return combined, report
 
 
 def analyse_uploads_combined(named_files,
                              exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
-                             oracle_max_layouts=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS):
+                             oracle_max_layouts=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS,
+                             batches=None, buffer_ratio=DEFAULT_BUFFER_RATIO):
     """Run the combined pipeline on several uploaded workbooks' bytes.
 
     `named_files` is a list of `(filename, file_bytes)` pairs. Combined mode
@@ -131,7 +143,9 @@ def analyse_uploads_combined(named_files,
                    for filename, file_bytes in named_files]
     return evaluate_combined(extractions,
                              exact_max_layouts=exact_max_layouts,
-                             oracle_max_layouts=oracle_max_layouts)
+                             oracle_max_layouts=oracle_max_layouts,
+                             batches=batches,
+                             buffer_ratio=buffer_ratio)
 
 
 # --------------------------------------------------------------------------
@@ -558,6 +572,151 @@ def _render_item_bobbin_usage(st, report):
     if usage.get("assumptions"):
         box.caption(usage["assumptions"])
     for warning in usage.get("warnings") or []:
+        box.warning(warning)
+
+
+def _batch_ledger_roll_rows(item):
+    """The Batch ledger roll table's body cells as display strings, one dict
+    per ledger row (a `batch_ledger` item's `rolls` entries — rolls where
+    the item is tufted or where its bobbins are mounted/released/swapped).
+    No Streamlit — the testable core of `_render_batch_ledger`."""
+    rows = []
+    for roll in item.get("rolls", []):
+        width = roll.get("item_width_in")
+        width_text = (f"{_clean_number(width)}"
+                      if isinstance(width, (int, float))
+                      and not isinstance(width, bool) else "-")
+        rows.append({
+            "position": str(roll.get("position")),
+            "navision_lot": str(roll.get("navision_lot") or ""),
+            "item_width_in": width_text,
+            "bobbins_hanging": str(roll.get("bobbins_hanging")),
+            "lb_per_bobbin": _lb_text(roll.get("lb_per_bobbin")),
+            "mounted_fresh": str(roll.get("mounted_fresh")),
+            "mounted_reused": str(roll.get("mounted_reused")),
+            "released": str(roll.get("released")),
+            "swapped": str(roll.get("swapped")),
+        })
+    return rows
+
+
+def _batch_leftover_rows(item):
+    """The Leftover at order end table's body cells as display strings: the
+    batch's untouched full bobbins first, then every partial group (bobbins
+    sharing a remaining weight), fullest first, each saying where it sits.
+    No Streamlit — the testable core of `_render_batch_ledger`."""
+    end = item.get("end_state") or {}
+    rows = []
+    full = end.get("full_bobbins_remaining")
+    if full is not None:
+        rows.append({
+            "bobbins": str(full),
+            "remaining_lb": f"{_clean_number(end.get('full_bobbin_weight_lb'))}",
+            "where": "in batch (untouched)",
+        })
+    for group in end.get("partial_bobbins") or []:
+        rows.append({
+            "bobbins": str(group.get("bobbins")),
+            "remaining_lb": _lb_text(group.get("remaining_lb")),
+            "where": str(group.get("where")),
+        })
+    return rows
+
+
+def _render_batch_ledger(st, report):
+    """The batch-aware bobbin ledger: per item, the assigned batch and its
+    requirement checks, the roll-by-roll mounts (fresh vs re-used partials),
+    releases and swaps, and the leftover at order end — how many bobbins
+    remain and the pounds on each. Rendered only when the report carries a
+    non-empty `batch_ledger` key (a batch workbook was uploaded and matched
+    at least one item); when the key is absent this renders nothing at all,
+    so reports without batch data keep their layout."""
+    ledger = report.get("batch_ledger")
+    if not ledger:
+        return
+    box = st.container(border=True)
+    box.markdown("#### Batch ledger")
+    buffer_ratio = ledger.get("buffer_ratio")
+    if isinstance(buffer_ratio, (int, float)):
+        box.caption(
+            f"One inventory batch per item for the whole run, simulated "
+            f"bobbin by bobbin with a {buffer_ratio * 100:.0f}% planning "
+            "buffer. Removed bobbins are kept creel-side and re-mounted "
+            "where their remaining yarn covers the position's upcoming "
+            "demand, before any fresh bobbin is used.")
+
+    def cell(text):
+        # A literal "|" in a value would split the markdown table cell.
+        return str(text).replace("|", "\\|")
+
+    for item in ledger.get("items") or []:
+        batch = item.get("batch") or {}
+        req = item.get("requirements") or {}
+        box.markdown(f"##### Item {cell(item.get('item_number'))} — "
+                     f"{cell(item.get('yarn_type'))}, "
+                     f"{cell(item.get('color_code'))} — batch "
+                     f"{cell(batch.get('batch_number'))}")
+        need = (f"Needs {req.get('lbs_needed')} lb "
+                f"({req.get('lbs_with_buffer')} lb with buffer) and "
+                f"{req.get('bobbins_required')} bobbins · batch holds "
+                f"{batch.get('bobbin_count')} bobbins × "
+                f"{batch.get('weight_per_bobbin_lb')} lb = "
+                f"{batch.get('total_weight_lb')} lb")
+        if req.get("feasible"):
+            box.markdown(need)
+        else:
+            box.error(need + " — the batch does not cover this "
+                             "requirement.")
+
+        rows = _batch_ledger_roll_rows(item)
+        if rows:
+            lines = [
+                "| Position | Lot | Item width (in) | Bobbins | lb/bobbin "
+                "| Mounted fresh | Re-used | Released | Swapped |",
+                "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: "
+                "| ---: |",
+            ]
+            for row in rows:
+                lines.append(
+                    f"| {row['position']} | {cell(row['navision_lot'])} "
+                    f"| {row['item_width_in']} | {row['bobbins_hanging']} "
+                    f"| {row['lb_per_bobbin']} | {row['mounted_fresh']} "
+                    f"| {row['mounted_reused']} | {row['released']} "
+                    f"| {row['swapped']} |")
+            box.markdown("\n".join(lines))
+
+        totals = item.get("totals") or {}
+        end = item.get("end_state") or {}
+        parts = [f"fresh bobbins used: {totals.get('fresh_bobbins_used')}",
+                 f"re-used mounts: {totals.get('reused_mounts')}",
+                 f"bobbins swapped: {totals.get('bobbins_swapped')}",
+                 f"total drawn: {_lb_text(totals.get('total_drawn_lb'), 1)} "
+                 "lb"]
+        if totals.get("shortfall_bobbins"):
+            parts.append(f"bobbins short: {totals['shortfall_bobbins']}")
+        box.markdown("**Totals:** " + " · ".join(parts))
+
+        leftover_rows = _batch_leftover_rows(item)
+        if leftover_rows:
+            box.markdown(f"**Leftover at order end** — "
+                         f"{_lb_text(end.get('total_leftover_lb'), 1)} lb "
+                         "in total")
+            lines = [
+                "| Bobbins | Weight each (lb) | Where |",
+                "| ---: | ---: | --- |",
+            ]
+            for row in leftover_rows:
+                lines.append(f"| {row['bobbins']} | {row['remaining_lb']} "
+                             f"| {cell(row['where'])} |")
+            box.markdown("\n".join(lines))
+
+    unmatched = ledger.get("unmatched_items")
+    if unmatched:
+        box.caption("Items with no batch in the workbook (not simulated): "
+                    + ", ".join(str(i) for i in unmatched))
+    if ledger.get("assumptions"):
+        box.caption(ledger["assumptions"])
+    for warning in ledger.get("warnings") or []:
         box.warning(warning)
 
 
@@ -1213,6 +1372,10 @@ def _render_report(st, filename, extraction, report, download_stem=None):
     # `bobbin_usage` key (items matched in data/item_bobbin_data.csv).
     _render_item_bobbin_usage(st, report)
 
+    # Batch ledger — only when a batch workbook was uploaded and matched at
+    # least one item (the `batch_ledger` key is omitted otherwise).
+    _render_batch_ledger(st, report)
+
     # Solution quality.
     qbox = st.container(border=True)
     qbox.markdown("#### Solution quality")
@@ -1354,13 +1517,40 @@ def main():
                 "Above 22 distinct layouts the exact method runs out of "
                 "memory, so the fast method is always used and these settings "
                 "have no effect.")
+        st.header("Batch planning")
+        buffer_percent = st.number_input(
+            "Planning buffer (%)", min_value=0, max_value=50,
+            value=int(round(DEFAULT_BUFFER_RATIO * 100)),
+            help="The planners' safety margin, applied when a batch's pounds "
+                 "are checked against an order and when deciding whether a "
+                 "bobbin's remaining yarn can feed the next rolls. Only used "
+                 "when a batch workbook is uploaded.")
 
     uploads = st.file_uploader(
         "Order workbook(s)", type=["xlsx"], accept_multiple_files=True)
 
+    batch_upload = st.file_uploader(
+        "Batch inventory workbook (optional)", type=["xlsx"],
+        accept_multiple_files=False,
+        help="One row per inventory batch: batch_number, item_number, "
+             "number_of_bobbins, weight_per_bobbin, total_batch_weight. "
+             "When given, each report gains a Batch ledger section — batch "
+             "assignment per item and the predicted leftover bobbins.")
+
     if not uploads:
         st.info("Upload one or more `.xlsx` order workbooks to begin.")
         return
+
+    batches = None
+    if batch_upload is not None:
+        batches, batch_warnings = load_batch_workbook(batch_upload.getvalue())
+        for warning in batch_warnings:
+            st.warning(f"{batch_upload.name}: {warning}")
+        if not batches:
+            st.warning(f"{batch_upload.name}: no usable batch rows — the "
+                       "reports below carry no batch ledger.")
+            batches = None
+    buffer_ratio = buffer_percent / 100.0
 
     mode = "Separate schedules"
     if len(uploads) >= 2:
@@ -1399,7 +1589,8 @@ def main():
             combined, report = evaluate_combined(
                 extractions,
                 exact_max_layouts=int(exact_max_layouts),
-                oracle_max_layouts=int(oracle_max_layouts))
+                oracle_max_layouts=int(oracle_max_layouts),
+                batches=batches, buffer_ratio=buffer_ratio)
         except Exception as exc:  # noqa: BLE001
             st.error(f"Could not sequence the combined order ({exc}).")
             return
@@ -1413,7 +1604,8 @@ def main():
             extraction, report = analyse_upload(
                 upload.name, upload.getvalue(),
                 exact_max_layouts=int(exact_max_layouts),
-                oracle_max_layouts=int(oracle_max_layouts))
+                oracle_max_layouts=int(oracle_max_layouts),
+                batches=batches, buffer_ratio=buffer_ratio)
         except TemplateMismatch as exc:
             st.error(f"{upload.name}: not a recognised FIELD LAYOUT workbook "
                      f"({exc}).")
