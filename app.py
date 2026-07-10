@@ -404,6 +404,12 @@ def _bobbin_usage_rows(item):
         width_text = (f"{_clean_number(width)}"
                       if isinstance(width, (int, float))
                       and not isinstance(width, bool) else "-")
+        # How many bobbins a planned swap replaces: just the positions that
+        # run short (`bobbins_swapped`). Reports predating that key fall back
+        # to the roll's full hanging count, their original meaning.
+        swapped = roll.get("bobbins_swapped")
+        if swapped is None:
+            swapped = roll.get("bobbins_hanging")
         rows.append({
             "position": str(roll.get("position")),
             "navision_lot": str(roll.get("navision_lot") or ""),
@@ -413,6 +419,36 @@ def _bobbin_usage_rows(item):
             "cumulative_lb_per_bobbin":
                 _lb_text(roll.get("cumulative_lb_per_bobbin")),
             "swap_before": bool(roll.get("swap_before")),
+            "bobbins_swapped": str(swapped),
+        })
+    return rows
+
+
+def _bobbin_groups_rows(item):
+    """The Bobbin depletion groups table's body cells as display strings,
+    one dict per depletion class (a `bobbin_usage` item's `bobbin_groups`
+    entries): inch positions with an identical coverage history deplete
+    identically, so one row stands for all of them. The swap-related figures
+    are None when the item's fresh bobbin weight is unknown and render as
+    "-". No Streamlit and no PDF library — the testable core shared by
+    `_render_item_bobbin_usage` and `_draw_bobbin_usage`."""
+    rows = []
+    for group in item.get("bobbin_groups") or []:
+        width = group.get("width_in")
+        width_text = (f"{_clean_number(width)}"
+                      if isinstance(width, (int, float))
+                      and not isinstance(width, bool) else "-")
+        swaps = group.get("swap_count")
+        consumed = group.get("fresh_bobbins_consumed")
+        rows.append({
+            "width_in": width_text,
+            "bobbin_count": str(group.get("bobbin_count")),
+            "rolls_fed": str(group.get("rolls_fed")),
+            "lb_drawn_per_bobbin": _lb_text(group.get("lb_drawn_per_bobbin")),
+            "swap_count": str(swaps) if swaps is not None else "-",
+            "fresh_bobbins_consumed":
+                str(consumed) if consumed is not None else "-",
+            "final_remaining_lb": _lb_text(group.get("final_remaining_lb")),
         })
     return rows
 
@@ -428,24 +464,26 @@ def _bobbin_usage_totals_parts(item):
     if totals.get("rolls_with_item") is not None:
         parts.append(f"rolls with this item: {totals['rolls_with_item']}")
     if totals.get("total_lb_per_bobbin") is not None:
-        parts.append(f"total drawn per bobbin: "
+        parts.append(f"total drawn per bobbin (deepest position): "
                      f"{_lb_text(totals['total_lb_per_bobbin'])} lb")
     if totals.get("swap_count") is not None:
         parts.append(f"bobbin swaps: {totals['swap_count']}")
     if totals.get("estimated_fresh_bobbins_consumed") is not None:
-        parts.append(f"est. fresh bobbins consumed: "
+        parts.append(f"fresh bobbins consumed: "
                      f"{totals['estimated_fresh_bobbins_consumed']}")
     if totals.get("final_remaining_lb_per_bobbin") is not None:
-        parts.append(f"left per bobbin at the end: "
+        parts.append(f"left per bobbin at the end (deepest position): "
                      f"{_lb_text(totals['final_remaining_lb_per_bobbin'])} lb")
     return parts
 
 
 def _render_item_bobbin_usage(st, report):
     """Per-item bobbin usage over the run: for each item with weight data in
-    `data/item_bobbin_data.csv`, the pounds every hanging bobbin loses on
-    each roll, the running cumulative, and — where the item's fresh bobbin
-    weight is known — the rolls before which the bobbins must be swapped for
+    `data/item_bobbin_data.csv`, the pounds a hanging bobbin loses on each
+    roll, the running cumulative (of the deepest-drawn covered position), a
+    depletion-groups table (one row per set of positions fed by the same
+    rolls), and — where the item's fresh bobbin weight is known — the rolls
+    before which some positions' bobbins must be swapped for
     fresh ones. Rendered only when the report carries a non-empty
     `bobbin_usage` key; when the key is absent (or None — no items matched
     the weight table) this renders nothing at all, so existing reports keep
@@ -495,6 +533,23 @@ def _render_item_bobbin_usage(st, report):
                 f"| {row['lb_per_bobbin']} "
                 f"| {row['cumulative_lb_per_bobbin']} | {marker} |")
         box.markdown("\n".join(lines))
+
+        group_rows = _bobbin_groups_rows(item)
+        if group_rows:
+            box.markdown("**Bobbin depletion groups** — one row per set of "
+                         "positions fed by the same rolls")
+            group_lines = [
+                "| Width (in) | Bobbins | Rolls fed | lb drawn/bobbin "
+                "| Swaps | Fresh bobbins | Remaining lb |",
+                "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+            for g in group_rows:
+                group_lines.append(
+                    f"| {g['width_in']} | {g['bobbin_count']} "
+                    f"| {g['rolls_fed']} | {g['lb_drawn_per_bobbin']} "
+                    f"| {g['swap_count']} | {g['fresh_bobbins_consumed']} "
+                    f"| {g['final_remaining_lb']} |")
+            box.markdown("\n".join(group_lines))
 
         parts = _bobbin_usage_totals_parts(item)
         if parts:
@@ -916,13 +971,16 @@ def _draw_bobbin_usage(pdf, report):
     """Append the Item bobbin usage section to the run sheet: for every item
     with weight data, a header line with the item's metadata, a compact table
     of the rolls it appears on (per-bobbin pounds drawn and the running
-    cumulative), a totals line, and the model's assumptions. Where the item's
-    fresh bobbin weight is known and a roll's `swap_before` is set, a red
-    BOBBIN SWAP band — the bobbin twin of the SETUP CHANGE band — precedes
-    that roll's row, naming how many bobbins to replace. Draws nothing when
-    the report has no `bobbin_usage` key, so the existing PDF is unchanged
-    for reports without one. The PDF's core fonts are latin-1, so the text
-    here sticks to plain ASCII separators."""
+    cumulative of the deepest-drawn covered position), a Bobbin depletion
+    groups table (one row per set of positions fed by the same rolls), a
+    totals line, and the model's assumptions. Where the item's fresh bobbin
+    weight is known and a roll's `swap_before` is set, a red BOBBIN SWAP
+    band — the bobbin twin of the SETUP CHANGE band — precedes that roll's
+    row, naming how many bobbins to replace (`bobbins_swapped`: just the
+    positions that run short, not the roll's full hanging count). Draws
+    nothing when the report has no `bobbin_usage` key, so the existing PDF
+    is unchanged for reports without one. The PDF's core fonts are latin-1,
+    so the text here sticks to plain ASCII separators."""
     usage = report.get("bobbin_usage")
     if not usage:
         return
@@ -1024,7 +1082,7 @@ def _draw_bobbin_usage(pdf, report):
             if ensure(row_h + (marker_h if swap else 0)):
                 draw_table_header()
             if swap:
-                draw_swap_band(row["bobbins_hanging"])
+                draw_swap_band(row["bobbins_swapped"])
             pdf.set_x(pdf.l_margin)
             pdf.set_font("Helvetica", "", 8)
             pdf.set_text_color(20, 20, 20)
@@ -1042,6 +1100,53 @@ def _draw_bobbin_usage(pdf, report):
             pdf.cell(w_cum, row_h, _latin1(row["cumulative_lb_per_bobbin"]),
                      border=1, align="R")
             pdf.ln(row_h)
+
+        group_rows = _bobbin_groups_rows(item)
+        if group_rows:
+            group_columns = [
+                ("Width (in)", 22, "R"), ("Bobbins", 18, "R"),
+                ("Rolls fed", 18, "R"), ("lb drawn/bobbin", 30, "R"),
+                ("Swaps", 14, "R"), ("Fresh bobbins", 26, "R"),
+                ("Remaining lb", 26, "R")]
+            group_keys = ["width_in", "bobbin_count", "rolls_fed",
+                          "lb_drawn_per_bobbin", "swap_count",
+                          "fresh_bobbins_consumed", "final_remaining_lb"]
+
+            def draw_groups_header():
+                pdf.set_x(pdf.l_margin)
+                pdf.set_font("Helvetica", "B", 8)
+                pdf.set_fill_color(240, 240, 240)
+                pdf.set_draw_color(180, 180, 180)
+                pdf.set_text_color(40, 40, 40)
+                for title, width, align in group_columns:
+                    pdf.cell(width, 6, _latin1(title), border=1, align=align,
+                             fill=True)
+                pdf.ln(6)
+
+            # Keep the sub-heading, table header and first row together.
+            ensure(5.5 + 2 + 6 + row_h)
+            pdf.ln(2)
+            pdf.set_x(pdf.l_margin)
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_text_color(20, 20, 20)
+            pdf.cell(0, 5.5, _latin1("Bobbin depletion groups - one row per "
+                                     "set of positions fed by the same "
+                                     "rolls"),
+                     new_x="LMARGIN", new_y="NEXT")
+            draw_groups_header()
+            for g in group_rows:
+                if ensure(row_h):
+                    draw_groups_header()
+                pdf.set_x(pdf.l_margin)
+                pdf.set_font("Helvetica", "", 8)
+                pdf.set_text_color(20, 20, 20)
+                pdf.set_draw_color(200, 200, 200)
+                for (title, width, align), key in zip(group_columns,
+                                                      group_keys):
+                    pdf.cell(width, row_h, _latin1(g[key]), border=1,
+                             align=align)
+                pdf.ln(row_h)
+            pdf.ln(1)
 
         parts = _bobbin_usage_totals_parts(item)
         if parts:

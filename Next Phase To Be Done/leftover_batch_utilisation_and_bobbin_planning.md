@@ -365,11 +365,13 @@ implemented:
   0.04831 lb/sqft) and the remaining items and fresh bobbin weights are to
   be filled in.
 - `bobbin_usage.py` computes, per matched item, each roll's consumption per
-  bobbin (`w × length_ft / 36`, §6) and the cumulative depletion along the
-  optimised sequence. When the fresh bobbin weight is filled in it also
-  places planned swap points (zero margin for now; the swap margin from §9
-  question 8 becomes a parameter later) and estimates fresh bobbins
-  consumed under the uniform-position assumption.
+  bobbin (`w × length_ft / 36`, §6) and the depletion along the optimised
+  sequence, tracked per inch position from the front of the machine (fixed
+  creel alignment) and reported as depletion groups — one entry per set of
+  positions with an identical coverage history. When the fresh bobbin
+  weight is filled in it also places planned swap points (zero margin for
+  now; the swap margin from §9 question 8 becomes a parameter later) and
+  counts the fresh bobbins each group consumes.
 - The Phase 4 report carries this under a `bobbin_usage` key, the web app
   shows an "Item bobbin usage" card, and the downloadable run-sheet PDF
   gains a matching section with red BOBBIN SWAP bands alongside the
