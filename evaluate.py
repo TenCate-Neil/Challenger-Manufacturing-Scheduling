@@ -38,6 +38,11 @@ import json
 import sys
 from pathlib import Path
 
+from batch_ledger import (
+    DEFAULT_BUFFER_RATIO,
+    compute_batch_ledger,
+    load_batch_workbook,
+)
 from bobbin_usage import compute_bobbin_usage
 from item_data import load_item_data
 from item_requirements import item_requirements
@@ -253,14 +258,19 @@ def solution_quality(matrix, achieved_cost, optimal,
 # --------------------------------------------------------------------------
 def evaluate(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
              oracle_max_layouts=DEFAULT_EXACT_ORACLE_MAX_LAYOUTS,
-             extraction=None, warnings=None):
+             extraction=None, warnings=None,
+             batches=None, buffer_ratio=DEFAULT_BUFFER_RATIO):
     """Optimise an order's rolls and evaluate the result against the plan's
     four reporting criteria (section 6). Returns a JSON-serialisable report.
 
     `rolls` is the list of roll dicts (Phase 1's `load_rolls` output).
     `extraction` is the optional full extraction dict, used only to echo the
     source file and purchase order number and to cross-check totals against
-    the extractor's MFG summary.
+    the extractor's MFG summary. `batches` is an optional
+    `batch_ledger.load_batch_workbook` result (available inventory batches
+    per item); when given, and at least one batch matches an item of the
+    order, the report gains a `batch_ledger` key — the batch-aware bobbin
+    ledger simulated with the `buffer_ratio` planning margin.
 
     The report contains the optimised manufacturing sequence, the achieved
     cost, the conservation result, the solution-quality analysis, and the
@@ -326,6 +336,18 @@ def evaluate(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
             warnings.extend(item_data_warnings)
             warnings.extend(bobbin_usage["warnings"])
 
+    # Batch-aware bobbin ledger (batch_ledger.py) — only when the caller
+    # supplied a batch inventory and at least one of its batches matches an
+    # item of this order; the key is omitted otherwise, keeping the report
+    # shape unchanged for callers without batch data. Its warnings surface
+    # in the same `warnings` list, like the sections above.
+    batch_ledger = None
+    if batches:
+        batch_ledger = compute_batch_ledger(
+            sequence, extraction, batches, buffer_ratio=buffer_ratio)
+        if batch_ledger is not None:
+            warnings.extend(batch_ledger["warnings"])
+
     return {
         "source_file": extraction.get("source_file")
         if isinstance(extraction, dict) else None,
@@ -344,6 +366,9 @@ def evaluate(rolls, exact_max_layouts=DEFAULT_EXACT_MAX_LAYOUTS,
         # Only present when the item bobbin data file is available and at
         # least one of its items appears in this order; omitted otherwise.
         **({"bobbin_usage": bobbin_usage} if bobbin_usage is not None else {}),
+        # Only present when a batch inventory was supplied and matched at
+        # least one item of this order; omitted otherwise.
+        **({"batch_ledger": batch_ledger} if batch_ledger is not None else {}),
         "layout_order": order,
         "layouts": [
             {
@@ -467,6 +492,18 @@ def _print_summary(path, report):
     print(f"  max / mean change:   {b['max_transition_cost']} in / "
           f"{b['mean_transition_cost']} in")
 
+    ledger = report.get("batch_ledger")
+    if ledger:
+        for item in ledger["items"]:
+            e = item["end_state"]
+            verdict = "" if item["requirements"]["feasible"] \
+                else "  [INSUFFICIENT]"
+            print(f"  batch ledger:        item {item['item_number']} <- "
+                  f"batch {item['batch']['batch_number']}: "
+                  f"{e['full_bobbins_remaining']} full + "
+                  f"{e['partial_bobbin_count']} partial bobbins left "
+                  f"({e['total_leftover_lb']} lb){verdict}")
+
     for w in report["warnings"]:
         print(f"  warning: {w}")
 
@@ -495,7 +532,21 @@ def main():
                         help="Join all inputs into one combined order and "
                              "evaluate it as a single sequence, instead of "
                              "evaluating each file on its own.")
+    parser.add_argument("--batches",
+                        help="Batch inventory workbook (.xlsx). When given, "
+                             "the report gains a batch_ledger key: batch "
+                             "assignment per item and the bobbin-level "
+                             "leftover prediction.")
+    parser.add_argument("--buffer", type=float, default=DEFAULT_BUFFER_RATIO,
+                        help="Planning buffer ratio for the batch ledger "
+                             f"(default {DEFAULT_BUFFER_RATIO}).")
     args = parser.parse_args()
+
+    batches = None
+    if args.batches:
+        batches, batch_warnings = load_batch_workbook(args.batches)
+        for w in batch_warnings:
+            print(f"warning: {w}")
 
     out_dir = None
     if args.out_dir:
@@ -523,6 +574,8 @@ def main():
             exact_max_layouts=args.exact_max_layouts,
             oracle_max_layouts=args.oracle_max_layouts,
             extraction=extraction,
+            batches=batches,
+            buffer_ratio=args.buffer,
         )
         _print_summary(label, report)
 

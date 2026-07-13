@@ -80,8 +80,8 @@ def test_app_empty_state_runs():
     at = AppTest.from_file("app.py").run(timeout=30)
     assert not at.exception, at.exception
     assert at.title[0].value == "Roll sequencing"
-    # Two sidebar controls (exact threshold, oracle threshold).
-    assert len(at.number_input) == 2
+    # Three sidebar controls (exact threshold, oracle threshold, buffer %).
+    assert len(at.number_input) == 3
     # With no upload the app prompts for a file rather than erroring.
     assert any("Upload one or more" in i.value for i in at.info)
 
@@ -109,6 +109,8 @@ def test_render_report_path():
     assert not any("Item batch requirements" in m.value for m in at.markdown)
     # Likewise no (truthy) bobbin_usage key -> no Item bobbin usage card.
     assert not any("Item bobbin usage" in m.value for m in at.markdown)
+    # And no batch workbook -> no batch_ledger key -> no Batch ledger card.
+    assert not any("Batch ledger" in m.value for m in at.markdown)
 
 
 def test_sequence_view_carries_panel_numbers():
@@ -777,6 +779,132 @@ def test_render_report_shows_item_bobbin_usage():
     assert any("no swap margin" in c.value for c in at.caption)
     # Its warnings are shown as warnings, like the report's own.
     assert any("Synthetic bobbin warning" in w.value for w in at.warning)
+
+
+def _batch_ledger_block():
+    """A synthetic `batch_ledger` block shaped like the report contract —
+    built by hand, never by the batch module, so these tests pin the app's
+    rendering of the schema and nothing else."""
+    return {
+        "buffer_ratio": 0.10,
+        "items": [{
+            "item_number": 121054,
+            "yarn_type": "5040 XP+ (6Pin)",
+            "color_code": "WHI",
+            "color_name": "WHITE",
+            "batch": {"batch_number": "B1234", "item_number": "121054",
+                      "bobbin_count": 50, "weight_per_bobbin_lb": 4,
+                      "total_weight_lb": 200},
+            "requirements": {"lbs_needed": 30, "lbs_with_buffer": 33,
+                             "bobbins_required": 15, "lbs_feasible": True,
+                             "bobbins_feasible": True, "feasible": True},
+            "derived_rate_lb_per_sqft": 0.2239,
+            "rolls": [
+                {"position": 2, "navision_lot": "L2", "item_width_in": 5.0,
+                 "bobbins_hanging": 15, "lb_per_bobbin": 1.0,
+                 "mounted_fresh": 15, "mounted_reused": 0, "released": 0,
+                 "swapped": 0},
+                {"position": 3, "navision_lot": "L3", "item_width_in": 5.0,
+                 "bobbins_hanging": 15, "lb_per_bobbin": 1.0,
+                 "mounted_fresh": 0, "mounted_reused": 15, "released": 15,
+                 "swapped": 0},
+            ],
+            "totals": {"fresh_bobbins_used": 15, "reused_mounts": 15,
+                       "swap_events": 0, "bobbins_swapped": 0,
+                       "total_drawn_lb": 30, "shortfall_bobbins": 0,
+                       "unmet_lb": 0},
+            "end_state": {"full_bobbins_remaining": 35,
+                          "full_bobbin_weight_lb": 4,
+                          "partial_bobbins": [
+                              {"remaining_lb": 2, "bobbins": 15,
+                               "where": "on creel"}],
+                          "partial_bobbin_count": 15,
+                          "total_leftover_lb": 170,
+                          "shortfall_bobbins": 0},
+        }],
+        "unmatched_items": ["121051"],
+        "assumptions": "Removed partials are kept creel-side and "
+                       "re-mounted before any fresh bobbin is drawn.",
+        "warnings": ["Synthetic batch warning for the tests."],
+    }
+
+
+def test_batch_ledger_roll_rows_formatting():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    item = _batch_ledger_block()["items"][0]
+    rows = app._batch_ledger_roll_rows(item)
+    assert rows[0] == {"position": "2", "navision_lot": "L2",
+                       "item_width_in": "5", "bobbins_hanging": "15",
+                       "lb_per_bobbin": "1.0000", "mounted_fresh": "15",
+                       "mounted_reused": "0", "released": "0",
+                       "swapped": "0"}
+    assert rows[1]["mounted_reused"] == "15"
+    assert rows[1]["released"] == "15"
+
+
+def test_batch_leftover_rows_formatting():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    # The untouched full bobbins lead, then the partial groups with where
+    # each sits.
+    item = _batch_ledger_block()["items"][0]
+    rows = app._batch_leftover_rows(item)
+    assert rows[0] == {"bobbins": "35", "remaining_lb": "4",
+                       "where": "in batch (untouched)"}
+    assert rows[1] == {"bobbins": "15", "remaining_lb": "2.0000",
+                       "where": "on creel"}
+    # An item without an end state renders no leftover table.
+    assert app._batch_leftover_rows({}) == []
+
+
+# The render harness with a frozen-contract batch_ledger block injected into
+# the report, so the on-screen Batch ledger card must render.
+_BATCH_LEDGER_HARNESS = """
+import streamlit as st
+import app
+from evaluate import evaluate
+from test_app import _batch_ledger_block, _roll
+
+rolls = [_roll("L1", ("FG", 182), sort=1),
+         _roll("L2", ("WHI", 5), ("FG", 177), sort=2),
+         _roll("L3", ("FG", 177), ("WHI", 5), sort=3)]
+report = evaluate(rolls, extraction={"source_file": "SAMPLE.xlsx"})
+report["batch_ledger"] = _batch_ledger_block()
+app._render_report(st, "SAMPLE.xlsx", {"source_file": "SAMPLE.xlsx"}, report)
+"""
+
+
+def test_render_report_shows_batch_ledger():
+    if not _HAVE_DEPS:
+        return  # skip: dependency-free environment
+    at = AppTest.from_string(_BATCH_LEDGER_HARNESS).run(timeout=30)
+    assert not at.exception, at.exception
+    markdown = [m.value for m in at.markdown]
+    assert any("Batch ledger" in v for v in markdown)
+    # Per-item heading names the item and its batch.
+    assert any("Item 121054" in v and "B1234" in v for v in markdown)
+    # The requirement line: pounds with buffer and the batch's holdings.
+    assert any("30 lb (33 lb with buffer)" in v
+               and "50 bobbins × 4 lb = 200 lb" in v for v in markdown)
+    # The ledger table shows the re-used mounts and releases.
+    table = next(v for v in markdown if "| Mounted fresh |" in v)
+    assert "| 15 |" in table
+    # The leftover table: untouched fulls plus the on-creel partials.
+    leftover = next(v for v in markdown if "| Weight each (lb) |" in v)
+    assert "in batch (untouched)" in leftover
+    assert "on creel" in leftover
+    assert any("170.0 lb" in v and "Leftover at order end" in v
+               for v in markdown)
+    # Totals line, unmatched items, the buffer caption and assumptions.
+    assert any("re-used mounts: 15" in v for v in markdown)
+    captions = [c.value for c in at.caption]
+    assert any("10% planning" in c for c in captions)
+    assert any("121051" in c for c in captions
+               if "no batch in the workbook" in c)
+    assert any("re-mounted before any fresh bobbin" in c for c in captions)
+    # Its warnings are shown as warnings, like the report's own.
+    assert any("Synthetic batch warning" in w.value for w in at.warning)
 
 
 def _run_standalone():

@@ -382,6 +382,74 @@ and setup changes, and rolls that do not cover a position leave it
 untouched), and there is no safety margin — a position's bobbins are swapped
 the moment the next roll's draw would exceed what remains on them.
 
+## Batch ledger
+
+`batch_ledger.py` brings the batch side of planning into the pipeline: it
+takes the batches available in inventory, assigns one batch to each item of
+an order (one batch per item, never split — the rule in
+`docs/batch_assignment_context.md` §4), and simulates the optimised run
+bobbin by bobbin, so the leftover at order end is a predicted number instead
+of something discovered on the floor.
+
+The batch inventory is a small workbook, one row per batch, with columns
+`batch_number`, `item_number`, `number_of_bobbins`, `weight_per_bobbin` and
+`total_batch_weight` (column order does not matter). Every bobbin is taken
+to be full at `weight_per_bobbin`; a stated total that disagrees with
+bobbins × weight is warned about, and bobbins × weight is what the ledger
+uses. This upload is the interim shape of the Business Central feed the
+next-phase brief plans for — when that connection lands, it replaces the
+manual export, not the ledger.
+
+What the simulation does, per item:
+
+- **Requirement check.** The assigned batch must hold the order's pounds
+  (from the workbook's own yarn lbs block) **plus a planning buffer**
+  (default 10% — the planners' informal margin made an explicit, tunable
+  parameter, per the next-phase brief §8) and the required bobbin count
+  (max item width × 3). Among feasible batches the smallest wins, keeping
+  large batches for demands that need them; when none is feasible the
+  largest is simulated anyway and the shortfall is reported, not hidden.
+- **Consumption.** The rate needs no new measurement: it is derived as
+  item lbs ÷ the item's tufted area across the order, and each roll draws
+  `rate × length / 36` per bobbin — the same physics as the bobbin usage
+  model, so total draw equals the workbook's stated pounds by construction.
+- **The creel rule.** Bobbins hang while their inch positions carry the
+  item and come off at the setup change that gives those positions to
+  another colour. Removed bobbins are kept creel-side and **re-mounted
+  wherever their remaining yarn covers the position's upcoming demand plus
+  the buffer, before any fresh bobbin is used** — so when 182" of field
+  green narrows to 177" and later widens back, the 15 bobbins that came
+  off are the ones that go back on. Selection is best-fit (smallest
+  sufficient partial first), preserving fuller bobbins for deeper demands.
+  A hanging bobbin that cannot cover the next roll plus buffer is swapped
+  out beforehand — bobbins never run dry mid-roll.
+- **End state.** How many untouched full bobbins remain in the batch, and
+  every partial's remaining pounds — grouped by weight, split into still
+  hanging on the creel vs removed creel-side. This is exactly the leftover
+  picture the planned cross-order batch sharing needs.
+
+In the app, a second (optional) uploader takes the batch workbook and the
+sidebar gains a **Planning buffer (%)** setting; each report then shows a
+**Batch ledger** card — assignment and feasibility per item, the
+roll-by-roll mounts (fresh vs re-used), releases and swaps, and the
+leftover table. The Phase 4 JSON report carries the same data under a
+`batch_ledger` key (omitted when no batch matches, so existing reports keep
+their shape). In combined mode one batch serves an item across the whole
+combined run — the combined-mode semantics question in the docs, resolved
+provisionally in the "across the run" direction.
+
+```bash
+python batch_ledger.py EXTRACTED.json --batches BATCHES.xlsx [--buffer 0.1]
+python evaluate.py EXTRACTED.json --batches BATCHES.xlsx   # adds the key
+```
+
+Tests:
+
+```bash
+python test_batch_ledger.py        # standalone runner
+pytest test_batch_ledger.py       # if pytest is installed
+```
+
 ## Combined mode
 
 Several orders can be joined and sequenced as one combined run.

@@ -377,7 +377,29 @@ implemented:
   gains a matching section with red BOBBIN SWAP bands alongside the
   existing SETUP CHANGE bands.
 
-Not yet implemented from this document: the batch-availability side
-(Business Central), the sharing feasibility pipeline (§3.4), partial-bobbin
-reuse within an order, the swap margin, and the per-stop penalty (pending
-the §9 floor answers).
+Since then, the batch ledger is implemented (`batch_ledger.py`, July 2026):
+
+- The batch-availability side has an interim shape: a batch inventory
+  workbook (`batch_number`, `item_number`, `number_of_bobbins`,
+  `weight_per_bobbin`, `total_batch_weight`), uploaded in the app or passed
+  via `--batches`, standing in for the Business Central feed (§9 question
+  12) until that connection is decided.
+- One batch is assigned per item (smallest feasible; largest with a warning
+  when none covers), checked against the order's pounds **with the buffer**
+  and bobbin count — the §8 buffer is now the explicit, tunable parameter
+  this document asked for (default 10%).
+- The whole optimised run is simulated per bobbin using the §6 formula with
+  the rate derived from the workbook's yarn lbs block, and the report
+  carries the **end state** §7 needs: untouched full bobbins remaining and
+  every partial's remaining pounds, on creel and creel-side.
+- Partial-bobbin reuse within an order is implemented as the ledger's
+  mounting rule: removed partials are re-mounted best-fit (smallest
+  sufficient, buffered) before any fresh bobbin is drawn, and a hanging
+  bobbin that cannot cover the next roll plus buffer is swapped proactively
+  (§5 — never dry mid-roll; within-batch splicing only, which the
+  one-batch-per-item rule guarantees).
+
+Not yet implemented from this document: the live Business Central
+connection, the sharing feasibility pipeline across orders (§3.4),
+batch-aware layout signatures in combined mode (§3.1), and the per-stop
+penalty (pending the §9 floor answers).
