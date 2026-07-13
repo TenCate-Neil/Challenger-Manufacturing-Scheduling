@@ -302,6 +302,9 @@ bobbin count and swap points against what actually happens on the floor.
 
 ## 9. Information to collect from manufacturing
 
+Update (July 2026): items 1–3, 12 and 13 are answered, and item 11 is
+answered in the negative — see §12 for the answers and their consequences.
+
 Ask for numbers in minutes, not descriptions — the answers become c_move
 and c_new directly.
 
@@ -340,6 +343,9 @@ simplified cost model rests on, §3.2) and item 11 (leftover accuracy, the
 go/no-go evidence for planned sharing).
 
 ## 10. Open questions
+
+Update (July 2026): questions 2 and 3 are resolved and question 1 has a
+provisional answer — see §12.
 
 1. Length of the frozen planning window.
 2. Floor confirmation of the two assumptions behind the simplified cost
@@ -400,6 +406,68 @@ Since then, the batch ledger is implemented (`batch_ledger.py`, July 2026):
   one-batch-per-item rule guarantees).
 
 Not yet implemented from this document: the live Business Central
-connection, the sharing feasibility pipeline across orders (§3.4),
-batch-aware layout signatures in combined mode (§3.1), and the per-stop
-penalty (pending the §9 floor answers).
+connection, the sharing feasibility pipeline across orders (§3.4), and
+batch-aware layout signatures in combined mode (§3.1). The per-stop
+penalty is no longer pending — it is ruled out by the July 2026 answers
+(§12, item 1).
+
+## 12. Planning answers — July 2026
+
+Answers obtained in planning discussion (July 2026), resolving several of
+the questions in §9–10. Recorded here with their model consequences.
+
+1. **No fixed per-stop overhead; no move-vs-new time difference**
+   (§9 questions 1–3 and 13). The only cost of a stop is the time taken to
+   make the changes themselves. Because scheduling this project produces a
+   known manufacturing order in advance, bobbins are fetched and staged
+   before the stoppage (kitting), so replacing a bobbin and mounting a
+   fresh one cost the same. Consequences: the per-stop penalty of §3.3 is
+   **not** added; the simplified cost model of §3.2 stands — cost equals
+   bobbins changed, 3 × mismatched inches per item on (item, batch)
+   identity — and everything already built survives unchanged. Long runs
+   emerge from minimising bobbins changed, not from a lexicographic
+   stops-first objective. A partial seam match (e.g. field green matched
+   across two orders, a 5" white stripe changed) therefore retains almost
+   all of a full match's value; full-item-set matching is preferred only
+   by its bobbin saving.
+
+2. **Fresh-bobbin weights are obtainable; leftover actuals are not**
+   (§9 questions 7 and 11). Fresh bobbin net weight per yarn type will be
+   collected. Leftover quantities are not tracked on the floor today and
+   will not be, so the computed-vs-actual leftover comparison this
+   document asked for is unavailable. Replacement validation path: for one
+   upcoming order, check the plan at the **swap-point level** (do
+   operators swap where the run sheet's BOBBIN SWAP bands say) and
+   reconcile **fresh bobbins consumed** per order — both countable without
+   weighing anything. Until validated, the receiving order's guarantee
+   stays in full bobbins only (§7) and the buffer carries the prediction
+   risk.
+
+3. **Business Central batch fields confirmed** (§9 question 12). Per
+   batch: item number, batch weight, number of bobbins, and associated
+   dates. Both aggregates the ledger needs exist natively; weight ÷
+   bobbins cross-checks the fresh-bobbin weight, and the dates allow
+   age-based tie-breaks. The interim upload workbook already matches this
+   shape. Still open: export vs live connection and refresh cadence — an
+   integration detail, not a design blocker.
+
+4. **Planning window: provisionally one week** (§10 question 1). Orders
+   carry a 21-day order-to-delivery guarantee, so a one-week frozen window
+   leaves roughly two further cycles of slack. Default rush-order handling
+   is therefore "join the next window", with mid-window re-planning as the
+   exception. Not yet fixed.
+
+5. **Assignment objective: bobbins changed first** (§10 question 3). When
+   several feasible sharings compete for a batch, the number of
+   stops/bobbins changed is the primary criterion. Small discarded
+   partials are absorbed by logo tufting elsewhere in the facility, so
+   small discards are priced at or near zero; only large discards need
+   weighing against a pairing's saving. Batch sizes are fixed as received
+   from extrusion — assignment is pure allocation over the given
+   inventory, never resizing.
+
+Remaining open after these answers: the fresh-bobbin weight values
+themselves (data pending), Business Central export-vs-live and refresh
+cadence, confirmation of the one-week window, and the combined-run
+one-batch semantics (§10 question 4, provisionally "across the run" in
+the batch ledger).
