@@ -471,3 +471,53 @@ themselves (data pending), Business Central export-vs-live and refresh
 cadence, confirmation of the one-week window, and the combined-run
 one-batch semantics (§10 question 4, provisionally "across the run" in
 the batch ledger).
+
+## 13. Multiple tufting machines
+
+The facility runs more than one tufting machine, each with its own creel
+and bobbins (noted July 2026). The single-machine framing in this document
+and the optimisation plan generalises by decomposition rather than by
+changing the model:
+
+1. **Two-level structure.** An outer step assigns orders to machines; the
+   existing pipeline (sequencing, seams, ledger simulation) then runs
+   unchanged as the inner loop, once per machine over that machine's
+   queue. Nothing already built needs modifying to survive this.
+
+2. **Batch sharing is machine-local.** A zero-change seam exists only on
+   one physical creel, so two orders sharing a batch for their seam must
+   be assigned to the *same* machine. The §3.4 pairing graph therefore
+   becomes an input to machine assignment: the value of co-assigning two
+   orders is their best seam saving.
+
+3. **Machine eligibility comes first.** Spec compatibility (product,
+   gauge/thread-up, pile height, roll width) gates which machines an
+   order can physically run on, before any optimisation.
+
+4. **Clustering vs delivery balance.** Dedicating a machine to a layout
+   family maximises seam savings, but the 21-day delivery promise bounds
+   how much work can pile onto one machine. The outer objective weighs
+   bobbin changes saved against due-date balance across machines — the
+   first place delivery dates enter the model.
+
+5. **Per-machine creel state.** The known-start-state seeding deferred to
+   Phase 6 of the optimisation plan applies per machine: a machine that
+   keeps a common layout threaded across planning windows becomes that
+   family's "home", a standing saving the assignment step should see.
+
+6. **Leftovers are per creel.** The ledger simulates each machine's queue
+   separately. Bobbins can physically move between machines (they are
+   already racked for "another tufter", §9 question 3), but only the yarn
+   moves — the threading saving is machine-local, so a transferred
+   leftover is inventory, not a seam.
+
+Questions to confirm with manufacturing:
+
+- how many machines, and whether they are identical (roll width,
+  gauge/thread-up, yarn types they can carry);
+- which products run on which machines;
+- whether one order's rolls are ever split across machines, and whether
+  one batch may feed two machines at once (the one-batch-per-item rule
+  does not obviously forbid it, but it fragments the batch and its
+  leftover prediction);
+- how work is allocated to machines today, and by whom.
