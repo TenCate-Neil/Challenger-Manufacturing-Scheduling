@@ -5,8 +5,9 @@
 - **Audience:** planners agreeing the approach; developers building the
   order-pool phase.
 - **Scope:** everything downstream of within-order sequencing: leftover
-  batches, per-bobbin feasibility and simulation, cross-order seams, and
-  the data still to be collected from the floor.
+  batches, per-bobbin feasibility and simulation, cross-order seams,
+  scheduling across multiple tufting stations, and the data still to be
+  collected from the floor.
 - **Depends on:** `docs/batch_assignment_context.md` (domain model this
   builds on) and `docs/optimisation_plan_Stage1.md` (the cost model §3
   generalises). See `docs/README.md` for the full document map.
@@ -62,21 +63,31 @@ Three options were considered:
    batch-assignment phase (the planned order-pool phase in
    `docs/batch_assignment_context.md` §6), allow one batch to be assigned to
    the same item across *multiple* orders when it covers each order's
-   requirement, and let the scheduler place those orders adjacent. The same
-   material and creel savings as reactive reuse, decided once at planning
-   time and frozen into the schedule.
+   requirement, and let the scheduler place their rolls in close proximity
+   (adjacency is emergent at roll level — §3.4). The same material and
+   creel savings as reactive reuse, decided once at planning time and
+   frozen into the schedule.
 
 Planned sharing computes what the floor already tries to approximate by
 eye — the order-to-order transition that changes the fewest bobbins — and
 does it across the whole order pool at once, producing a schedule that
 captures the downtime savings *and* can actually be followed.
 
-The key observation making this possible: the feasibility test for reuse is
-static. Because of the one-batch-per-item-per-order rule, a leftover is only
-usable if it covers the receiving order's *full* item requirement — a
-property of the orders as sets of rolls, computable upfront from data the
-pipeline already produces (`item_requirements.py`). Nothing requires waiting
-until a roll is tufted.
+Sharing is the primary way scheduling reduces downtime. A later-stage
+complement sits upstream: pushing extrusion for larger batch sizes of
+items that are used a lot, so a single batch can cover more orders and
+create more sharing opportunities (§3.3).
+
+The key observation making this possible: feasibility is computable at
+planning time. Because of the one-batch-per-item-per-order rule, a
+leftover is only usable if it covers the receiving order's *full* item
+requirement — a property of the orders as sets of rolls, derivable from
+data the pipeline already produces (`item_requirements.py`). Where the
+paired orders draw on the batch in sequence and may splice within it
+(§7), the check additionally depends on the planned manufacturing order —
+which order consumes first and what is predicted to remain — but that too
+is a simulation the pipeline runs before anything is tufted. Nothing
+requires waiting until a roll is tufted.
 
 A frozen planning window (length still to be decided) is required for this
 to hold. Rush orders entering mid-window either wait or trigger a re-plan.
@@ -101,6 +112,13 @@ item is a full mismatch, exactly like a different item — the bobbins come
 off either way. Layout signatures in combined mode must incorporate batch
 identity. Batch assignment and cross-order sequencing are therefore coupled:
 shared batches are what create the zero-cost seams between orders.
+
+The one-batch-per-item-per-order rule also works in the solver's favour:
+it shrinks the feasible space. A zero-change run can only extend across
+rolls whose positions carry the same (item, batch) — even an exactly
+similar item is a changeover if it comes from a different batch — so a
+run can only be so long, and far fewer candidate sequences are worth
+considering.
 
 ### 3.2 Cost simplification: bobbins changed (pending floor confirmation)
 
@@ -128,14 +146,15 @@ Everything already built survives verbatim: the distance matrix, Held–Karp,
 2-opt/Or-opt, symmetry (no asymmetric TSP), and the MST lower bound.
 Combined mode needs only batch-aware layout signatures.
 
-Two assumptions carry this simplification and must be verified with the
-floor (they are questions 1–3 and 13 in §9):
+One assumption carries this simplification and must be verified with the
+floor (questions 1–3 in §9):
 
-1. **Move ≈ remove-plus-mount in time.** If moving turns out much faster,
-   the tiered model returns.
-2. **No material fixed overhead per stop** beyond the bobbin work itself
-   (restart, re-tension, quality check). See §3.3 for what happens if this
-   fails.
+- **Move ≈ remove-plus-mount in time.** If moving turns out much faster,
+  the tiered model returns.
+
+A second assumption originally listed here — no material fixed overhead
+per stop beyond the bobbin work itself — has been overtaken by decision:
+the model carries no per-stop penalty regardless (§3.3).
 
 ### 3.3 Objective: long manufacturing runs
 
@@ -153,25 +172,28 @@ changes, never how many stops there are. Long runs are therefore won at
 the **pool level**:
 
 - batch sharing plus positional layout alignment creating zero-change
-  seams between orders (§ below), and
+  seams between orders (§3.4),
+- at a later stage, pushing extrusion for larger batch sizes of items
+  that are used a lot, so one batch can meet the requirements of several
+  orders combined and create more sharing opportunities, and
 - longer term, the amount of layout commonality in the order book itself —
   set upstream by field design, which scheduling can only harvest, not
   create.
 
-Model implication: if the floor confirms a stop carries fixed overhead
-beyond the bobbin changes, add a fixed penalty to every non-zero-cost
-transition:
-
-```
-cost = STOP_PENALTY (if any mismatch) + bobbins changed
-```
-
-This preserves the TSP structure (a constant added to nonzero edges).
-Within an order it adds a constant total and changes nothing; across
-orders it makes the solver prefer perfect-alignment seams first and bobbin
-savings second — the lexicographic "stops, then bobbins" objective. If the
-floor reports no fixed overhead, the plan doc's original
-no-stoppage-penalty assumption extends across orders unchanged.
+**Decision: no fixed per-stop penalty.** A fixed stopping cost was
+considered and set aside. Minimising bobbins changed already favours not
+stopping: a zero-change transition costs nothing, so when a batch meets
+the requirements of two orders combined and their roll layouts for that
+item are similar, the optimiser will chase exactly that seam — a fixed
+penalty would re-express a preference the objective already has. The plan
+doc's original no-stoppage-penalty assumption therefore extends across
+orders unchanged. For the record, the variant that was set aside was
+`cost = STOP_PENALTY (if any mismatch) + bobbins changed` — a
+lexicographic "stops, then bobbins" objective that preserves the TSP
+structure (a constant added to nonzero edges) and is inert within a
+single order; it can be revisited if evidence ever demands it, and a
+measured per-stop overhead can still refine absolute downtime
+*predictions* without changing which sequence wins.
 
 Reporting implication: evaluation should report the **run-length
 distribution** (linear feet between stops) and stop count alongside the
@@ -186,27 +208,47 @@ comes from the shared batch, the seam costs zero and the machine keeps
 running — the actual prize. Any mismatch means a stop regardless; sharing
 then only reduces the number of bobbins changed at that stop.
 
+A seam does not have to sit at the end of an order. The pool is sequenced
+at the **roll level**: orders are broken down into their rolls, and the
+one-batch-per-item-per-order rule is a constraint on those rolls, not an
+instruction to finish one order before starting the next. In practice the
+constraint pulls an order's rolls together — they share (item, batch)
+identity at their positions, so transitions among them are the cheap
+ones — but contiguity is an emergent outcome, not a hard rule. Rolls of
+different orders may interleave wherever that changes fewer bobbins; an
+order's rolls will most likely end up sequential, or at least in close
+proximity, without being forced to be.
+
 Sharing a batch between two orders therefore only makes sense when their
 roll layouts align positionally (or overlap substantially — a long common
 stretch such as 177" of field green at identical positions stays untouched
 even if 5" at the edge changes). The pairing metric is the **best seam
 cost**: the cheapest transition between any roll of order A and any roll of
-order B under shared-batch identity — the sequencer is free to end A and
-start B on exactly those rolls, so this is precisely the saving on offer.
+order B under shared-batch identity — precisely the saving on offer,
+wherever in the pooled sequence that seam ends up.
 
-Candidate pairs are found by cheap filters, each using data the extractor
-already produces:
+Candidate pairs are found by cheap filters using data the extractor
+already produces. Two filters matter, and they are really two faces of
+one measure:
 
-1. **Spec compatibility** — same product, gauge, pile height.
-2. **Layout alignment** — shared layout signatures, or low positional
+1. **Layout alignment** — shared layout signatures, or low positional
    mismatch between the best roll pair.
-3. **Batch feasibility** — for the items at the aligned positions: lbs
-   with margin, full-bobbin count, and the per-bobbin demand check (§6).
+2. **Batch feasibility** — for the items at the aligned positions: lbs
+   with margin and the per-bobbin checks of §4–§7, evaluated against the
+   planned manufacturing order of the two orders (§7).
 
-Only pairs surviving all three become sharing candidates; everything else
-keeps its own batch. Pairing couples order B's schedule to order A's
-completion, so the pair list is re-confirmed at each planning cycle rather
-than standing indefinitely.
+They combine because the (item, batch) combination is what determines the
+changeover cost, and that cost is computed from the layout alignment —
+the number of inches that change. **Spec compatibility (product, gauge,
+pile height) is not a gate**: a spec change is a very short stop made on
+the tufting machine itself, not creel work, so it does not disqualify a
+pair. This refines the Stage 1 plan's expectation (its assumption 4) that
+gauge and pile height would matter for cross-order grouping.
+
+Only pairs surviving both filters become sharing candidates; everything
+else keeps its own batch. Pairing couples order B's schedule to order A's
+progress through the shared batch, so the pair list is re-confirmed at
+each planning cycle rather than standing indefinitely.
 
 Notes retained from the tiered-model discussion, still relevant:
 
@@ -214,10 +256,29 @@ Notes retained from the tiered-model discussion, still relevant:
   creel-side) no longer affects sequencing under the simplified model, but
   still matters for absolute changeover-time predictions. Whether it
   already happens informally is a data question (§9).
-- If several people work a creel change in parallel, wall-clock changeover
-  is not linear in bobbin count; the additive model predicts labour
-  (person-minutes), not downtime directly. To be validated against a few
-  whole-changeover timings.
+- **Staffing is not modelled.** How many people work a creel change is
+  considered nowhere in the model: the objective is the optimal
+  manufacturing ordering, and bobbins changed measures the changeover
+  work a transition creates. Wall-clock downtime per stop depends on
+  staffing, but staffing does not change which ordering is optimal.
+
+### 3.5 Multiple tufting stations and the starting state
+
+Scheduling is not for a single machine. A few tufting stations are
+available, and the pool schedule must decide **which station tufts which
+rolls** as well as the sequence on each station.
+
+Each station also enters the planning window with a known state: the last
+roll of the previous week's schedule is still its current threading. The
+transition from that last roll to the first roll of the new plan is a real
+changeover, costed exactly like any other transition — so each station's
+sequence is seeded from its known start rather than a fresh start. This
+specifies what the Stage 1 plan deferred (its assumption 7: fresh start
+within one order; known-start seeding left to the cross-order phase).
+
+Practical station facts — how many stations there are, whether their
+creels are identical, and whether hanging bobbins can move between
+stations — are still to be collected (§9, §10).
 
 ## 4. Why the aggregate constraints are insufficient for used batches
 
@@ -256,6 +317,11 @@ Consequence: what is needed is per-bobbin **prediction**, not shop-floor
 tracking. Feasibility for a batch becomes: total lbs (with buffer) +
 width-coverage bobbins hanging + enough same-batch spares for the planned
 swaps.
+
+Rule 1 bounds splicing by *batch*, not by order. Whether within-batch
+splicing should also cross order boundaries when a batch is shared is a
+planning refinement, not a floor rule — see the splicing-aware pairing
+policy in §7.
 
 ## 6. Per-bobbin consumption formula
 
@@ -303,23 +369,46 @@ the whole run can be simulated:
 - the end state: how many untouched full bobbins remain in each batch and
   the approximate remainder on each partial.
 
-That end state is what planned sharing needs. The pairing policy: partition
-the batch's bobbins between the paired orders before tufting starts —
-designate the bobbin set the first order will consume, use its partials
-within that order where possible, and discard remaining partials so the
-second order's requirement is guaranteed in **full** bobbins (the only kind
-countable without weighing). Sharing feasibility then reduces to:
+That end state is what planned sharing needs. Two pairing policies exist,
+a conservative one and a splicing-aware one.
+
+**Conservative: partition and discard.** Partition the batch's bobbins
+between the paired orders before tufting starts — designate the bobbin set
+the first order will consume, use its partials within that order where
+possible, and discard remaining partials so the second order's requirement
+is guaranteed in **full** bobbins (the only kind countable without
+weighing). Sharing feasibility then reduces to a static check:
 
 ```
 predicted full bobbins remaining ≥ paired order's bobbin requirement
 AND remaining lbs ≥ paired order's lbs requirement
 ```
 
+**Splicing-aware (preferred direction, to be confirmed).** Splicing is
+allowed within a batch (§5 rule 1), and there is no obvious reason that
+should stop at an order boundary when the batch is shared: an untouched
+"brand new" bobbin from the same batch is itself a changeover — it still
+has to be mounted on the creel to be used — so insisting the second order
+start on fresh bobbins saves nothing over splicing in the first order's
+partials. Under this policy, feasibility is checked against the planned
+manufacturing order of the two orders: simulate the first order's
+consumption (§6), take the predicted remainders — partials included — and
+run the per-position matching check of §4 for the second order, with
+same-batch spares covering the planned swaps. This check is
+sequence-dependent where the conservative one is not: whether enough is
+left depends on which order runs first, and the batch assignment must be
+re-checked if the planned sequence changes.
+
+Which policy to trust hinges on how accurate the per-bobbin predictions
+prove to be (§9 item 10): full bobbins can be counted without weighing;
+partial remainders can only be predicted.
+
 Refinements:
 
 1. **Use partials before discarding.** Partials can feed the same order's
-   later rolls at short positions, or be spliced in within-batch. Discard
-   is the fallback, not the default.
+   later rolls at short positions, or be spliced in within-batch — and,
+   under the splicing-aware policy, feed the paired order. Discard is the
+   fallback, not the default.
 2. **Discards are a cost the optimiser must see.** Pairing an order onto a
    leftover batch saves a creel change but may cost N lbs of discarded
    partials; the trade is weighed, not assumed.
@@ -354,35 +443,42 @@ and c_new directly.
 5. How often orders are mixed today (leftover of one order's batch used to
    tuft another order's rolls), and whether that is usually one item or a
    mix.
-6. How many people work a creel change (parallelism vs the additive model).
-7. Standard new-bobbin net yarn weight per yarn type, and its bobbin-to-
+6. Standard new-bobbin net yarn weight per yarn type, and its bobbin-to-
    bobbin variation.
-8. The swap margin: how much yarn must remain on a bobbin before an
+7. The swap margin: how much yarn must remain on a bobbin before an
    operator will start the next roll on it.
-9. What happens to partial bobbins today — discarded, kept creel-side,
+8. What happens to partial bobbins today — discarded, kept creel-side,
    returned to inventory (quantifies the waste the simulator would reduce).
-10. A few whole-changeover timings (total minutes, inches changed, bobbins
-    moved vs new) to validate the linear cost model.
-11. Leftover accuracy: for several recent orders, computed leftover vs
+9. A few whole-changeover timings (total minutes, inches changed, bobbins
+   moved vs new) to validate the linear cost model.
+10. Leftover accuracy: for several recent orders, computed leftover vs
     actual measured leftover per batch.
-12. Batch data shape from Business Central: per batch — item number, batch
+11. Batch data shape from Business Central: per batch — item number, batch
     id, available lb, bobbin count, receipt date; whether bobbin count is
     tracked per batch; export vs live query, and refresh frequency.
-13. When the machine stops for a creel change, is there fixed time lost
-    beyond the bobbin changes themselves (restart, re-tension, quality
-    check)? This decides whether a per-stop penalty is added to the cost
-    model (§3.3).
+12. Station facts (§3.5): how many tufting stations are available, whether
+    their creels are identical, and whether hanging bobbins can move
+    between stations.
 
-Priority if limited: items 1–3 and 13 (they verify the two assumptions the
-simplified cost model rests on, §3.2) and item 11 (leftover accuracy, the
-go/no-go evidence for planned sharing).
+Priority if limited: items 1–3 (they verify the assumption the simplified
+cost model rests on, §3.2) and item 10 (leftover accuracy — the go/no-go
+evidence for planned sharing and for the splicing-aware policy, §7).
+
+Two earlier asks are closed and kept for the record:
+
+- *How many people work a creel change* — dropped: staffing is not
+  modelled (§3.4); the objective is the optimal manufacturing ordering.
+- *Fixed time lost per stop beyond the bobbin changes* — resolved by
+  decision: the cost model carries no per-stop penalty (§3.3). A measured
+  per-stop overhead would still refine absolute downtime predictions, but
+  it no longer decides the model.
 
 ## 10. Open questions
 
 1. Length of the frozen planning window.
-2. Floor confirmation of the two assumptions behind the simplified cost
-   model (§3.2): move ≈ remove-plus-mount timing, and whether a stop
-   carries fixed overhead requiring the per-stop penalty (§3.3).
+2. Floor confirmation of the assumption behind the simplified cost model
+   (§3.2): move ≈ remove-plus-mount timing. (The per-stop penalty question
+   is resolved — no fixed stopping cost, §3.3.)
 3. The assignment objective when several feasible sharings exist: creel
    changes saved vs batch fragmentation vs discarded-partial waste
    (sharpens open question 2 of `docs/batch_assignment_context.md` §7).
@@ -391,6 +487,12 @@ go/no-go evidence for planned sharing).
    `docs/batch_assignment_context.md` §7).
 5. How partial-bobbin discards are recorded so actual waste can be compared
    against the simulator's prediction.
+6. Whether the splicing-aware pairing policy (§7) is adopted, and the
+   accuracy the per-bobbin predictions must reach to justify it
+   (§9 item 10).
+7. Station assignment (§3.5): how rolls are allocated across the available
+   tufting stations, and how each station's seeded start state interacts
+   with the pooled sequence.
 
 ## 11. First step — implemented
 
@@ -408,7 +510,7 @@ implemented:
   creel alignment) and reported as depletion groups — one entry per set of
   positions with an identical coverage history. When the fresh bobbin
   weight is filled in it also places planned swap points (zero margin for
-  now; the swap margin from §9 question 8 becomes a parameter later) and
+  now; the swap margin from §9 item 7 becomes a parameter later) and
   counts the fresh bobbins each group consumes.
 - The Phase 4 report carries this under a `bobbin_usage` key, the web app
   shows an "Item bobbin usage" card, and the downloadable run-sheet PDF
@@ -420,8 +522,8 @@ Since then, the batch ledger is implemented (`batch_ledger.py`, July 2026):
 - The batch-availability side has an interim shape: a batch inventory
   workbook (`batch_number`, `item_number`, `number_of_bobbins`,
   `weight_per_bobbin`, `total_batch_weight`), uploaded in the app or passed
-  via `--batches`, standing in for the Business Central feed (§9 question
-  12) until that connection is decided.
+  via `--batches`, standing in for the Business Central feed (§9 item 11)
+  until that connection is decided.
 - One batch is assigned per item (smallest feasible; largest with a warning
   when none covers), checked against the order's pounds **with the buffer**
   and bobbin count — the §8 buffer is now the explicit, tunable parameter
@@ -438,6 +540,6 @@ Since then, the batch ledger is implemented (`batch_ledger.py`, July 2026):
   one-batch-per-item rule guarantees).
 
 Not yet implemented from this document: the live Business Central
-connection, the sharing feasibility pipeline across orders (§3.4),
-batch-aware layout signatures in combined mode (§3.1), and the per-stop
-penalty (pending the §9 floor answers).
+connection, the sharing feasibility pipeline across orders (§3.4, §7),
+batch-aware layout signatures in combined mode (§3.1), and multi-station
+scheduling seeded from each tufting station's last roll (§3.5).

@@ -164,8 +164,11 @@ These are the confirmed assumptions the plan rests on.
 4. **Cost unit is inches.** Cost is the positional inch mismatch — symmetric,
    additive over adjacent pairs only, and linear in inches (no fixed
    per-stoppage penalty). Gauge and pile height are identical for all rolls in a
-   single order, so they do not affect within-order sequencing; they become
-   relevant only for grouping across orders in a later phase.
+   single order, so they do not affect within-order sequencing. (An earlier
+   expectation that they would matter for grouping across orders was later
+   refined: spec changes are very short stops made on the tufting machine
+   itself, not creel work, so they do not gate cross-order pairing — see
+   `docs/leftover_batch_utilisation_and_bobbin_planning.md` §3.4.)
 5. The colour/type code at a position fully identifies what is threaded there.
 6. **Roll identity.** Each roll is identified by its `navision_lot` number, with
    `sort` as a stable secondary index. A lot entry may cover several physical
@@ -195,10 +198,11 @@ confirmed and folded into the assumptions above.
   show the ordered sequence, achieved cost, and transition breakdown. It runs
   locally (`streamlit run app.py`); no hosting or backend to deploy.
 - **Phase 6 (out of scope now):** combining rolls from multiple orders into one
-  schedule, and seeding the sequence from the machine's current threading (a
-  known start state) rather than a fresh start. The planning for this phase
-  lives in `docs/leftover_batch_utilisation_and_bobbin_planning.md`, which
-  extends the cost model here to (item, batch) identity.
+  schedule across the available tufting stations, and seeding each station's
+  sequence from its current threading (a known start state — the last roll of
+  the previous week's schedule) rather than a fresh start. The planning for
+  this phase lives in `docs/leftover_batch_utilisation_and_bobbin_planning.md`,
+  which extends the cost model here to (item, batch) identity.
 
 ## 10. Delivery approach
 
