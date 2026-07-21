@@ -1,7 +1,19 @@
-# Roll Sequencing Optimisation — Planning Document
+# Roll Sequencing Optimisation — Planning Document (Stage 1)
 
-Status: **draft for review**. No development starts until the logic and
-assumptions below are agreed.
+- **Purpose:** record of the agreed logic, cost model, and assumptions for
+  sequencing the rolls of a single order on the tufting machine.
+- **Audience:** developers working on the sequencing pipeline; planners
+  checking what the optimiser does and does not assume.
+- **Scope:** within a single order only. Cross-order scheduling, batch
+  identity, and bobbin-level planning are out of scope here — see
+  `docs/leftover_batch_utilisation_and_bobbin_planning.md`.
+- **Depends on:** the extractor output (`extract_turf_layout.py`, root
+  README). See `docs/README.md` for the full document map.
+- **Status:** agreed and implemented through Phase 5 (cost model,
+  sequencer, evaluation, Streamlit app — see root README for the module
+  reference). Retained as the authoritative record of the logic and
+  assumptions the implementation rests on; §3's cost model is generalised
+  for cross-order work in the leftover-batch document §3.
 
 ## 1. The challenge
 
@@ -184,7 +196,9 @@ confirmed and folded into the assumptions above.
   locally (`streamlit run app.py`); no hosting or backend to deploy.
 - **Phase 6 (out of scope now):** combining rolls from multiple orders into one
   schedule, and seeding the sequence from the machine's current threading (a
-  known start state) rather than a fresh start.
+  known start state) rather than a fresh start. The planning for this phase
+  lives in `docs/leftover_batch_utilisation_and_bobbin_planning.md`, which
+  extends the cost model here to (item, batch) identity.
 
 ## 10. Delivery approach
 

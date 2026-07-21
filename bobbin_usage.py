@@ -3,7 +3,7 @@
 Per-bobbin yarn consumption and swap planning over an optimised sequence.
 
 This implements the consumption side of the bobbin simulator described in
-`Next Phase To Be Done/leftover_batch_utilisation_and_bobbin_planning.md`
+`docs/leftover_batch_utilisation_and_bobbin_planning.md`
 (sections 5-7): given the optimised roll sequence, the extraction it came
 from, and the per-item bobbin data table (`item_data.py`), predict how much
 yarn each bobbin feeds per roll, where along the run a bobbin must be

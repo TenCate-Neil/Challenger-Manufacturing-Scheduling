@@ -1,8 +1,20 @@
 # Batch Assignment — Domain Context
 
-Status: **context captured, not yet implemented**. Batch assignment is done
-manually by the planners today. This document records the agreed domain model
-so a later phase can build on it without re-deriving the rules.
+- **Purpose:** the agreed domain model for products, creel geometry, items,
+  batches, and the batch-assignment rules — recorded so later phases build
+  on it without re-deriving the rules.
+- **Audience:** anyone working on the project; this is the reference the
+  other documents cite for domain rules.
+- **Scope:** domain facts and per-order requirements. How leftovers,
+  per-bobbin feasibility, and cross-order sharing are handled is specified
+  in `docs/leftover_batch_utilisation_and_bobbin_planning.md`, which builds
+  directly on §4 and §6 here.
+- **Depends on:** nothing — this is the root domain reference. See
+  `docs/README.md` for the full document map.
+- **Status:** domain model agreed. Batch assignment is done manually by the
+  planners today; the first automated steps are implemented (§8, and the
+  batch ledger in the leftover-batch document §11), the order-pool phase
+  (§6) is not yet built.
 
 ## 1. Product structure
 
@@ -122,10 +134,11 @@ open orders to assigned batches.
 2. **Assignment objective.** "Optimally assign" needs a defined objective
    when several feasible assignments exist — e.g. minimise leftover batch
    remnants, preserve large batches for large orders, or first-fit by ship
-   date. To be agreed with the planners.
+   date. To be agreed with the planners. Sharpened in the leftover-batch
+   document §10 (creel changes saved vs fragmentation vs discarded waste).
 3. **Combined mode semantics.** When several orders are joined into one run,
    is "one batch per item" enforced per original order or across the whole
-   combined run?
+   combined run? Carried forward in the leftover-batch document §10.
 
 ## 8. First step — implemented
 

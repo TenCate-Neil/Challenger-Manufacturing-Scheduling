@@ -4,6 +4,10 @@ Extracts manufacturing data from the `FIELD LAYOUT` sheet of turf order
 workbooks (e.g. `LOWELL_HSFWREVA.xlsx`, `POLK_E.S.PIVOT_100.xlsx`,
 `Richland_HS_FB.xlsx`) into structured JSON.
 
+This file is the code-level reference: how to run the tools and what each
+module does. For the project objective, the end-to-end picture, and the
+map of planning documents, start at `docs/README.md`.
+
 ## Usage
 
 ```bash
@@ -70,7 +74,7 @@ the console when running the script.
 ## Roll sequencing cost model (Phase 1)
 
 `roll_sequencing.py` is the costing layer described in
-`docs/optimisation_plan.md`. It measures how expensive a manufacturing
+`docs/optimisation_plan_Stage1.md`. It measures how expensive a manufacturing
 sequence is to set up; it does not reorder anything (choosing a cheaper
 sequence is a later phase).
 
@@ -112,7 +116,7 @@ pytest test_roll_sequencing.py     # if pytest is installed
 ## Collapse duplicates and distance graph (Phase 2)
 
 `layout_graph.py` prepares the sequencing problem described in
-`docs/optimisation_plan.md` section 4, steps 1 and 2. It does not choose an
+`docs/optimisation_plan_Stage1.md` section 4, steps 1 and 2. It does not choose an
 order (that is Phase 3); it collapses the order into distinct layouts and
 computes the distances between them.
 
@@ -149,7 +153,7 @@ pytest test_layout_graph.py        # if pytest is installed
 
 `sequencer.py` chooses the order in which the distinct layouts are
 manufactured to minimise total setup change cost — Step 3 of
-`docs/optimisation_plan.md` section 4.
+`docs/optimisation_plan_Stage1.md` section 4.
 
 The problem is the **open-path** form of the symmetric Travelling Salesman
 Problem: order the distinct layouts so the summed positional inch mismatch is
@@ -188,7 +192,7 @@ pytest test_sequencer.py           # if pytest is installed
 
 `evaluate.py` takes the optimised sequence from Phase 3 and reports whether it
 can be trusted and how good it is — the four criteria in
-`docs/optimisation_plan.md` section 6. It adds no sequencing logic; it measures
+`docs/optimisation_plan_Stage1.md` section 6. It adds no sequencing logic; it measures
 and explains the Phase 3 result, and emits the optimised sequence as JSON.
 
 - **Conservation** (`check_conservation`): the optimised sequence must be a
@@ -231,7 +235,7 @@ pytest test_evaluate.py            # if pytest is installed
 ## MVP front end (Phase 5)
 
 `app.py` is a thin [Streamlit](https://streamlit.io) front end over the same
-core functions the CLI uses (`docs/optimisation_plan.md`, Phase 5). It adds no
+core functions the CLI uses (`docs/optimisation_plan_Stage1.md`, Phase 5). It adds no
 logic of its own: it uploads an order workbook, runs the existing extractor and
 the Phase 4 evaluator, and shows the ordered manufacturing sequence, the
 achieved setup cost, the solution quality, the conservation result, and the

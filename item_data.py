@@ -2,8 +2,8 @@
 """
 Per-item bobbin data loader.
 
-Bobbin-level planning (see `Next Phase To Be Done/
-leftover_batch_utilisation_and_bobbin_planning.md`, sections 6 and 7) needs
+Bobbin-level planning (see
+`docs/leftover_batch_utilisation_and_bobbin_planning.md`, sections 6 and 7) needs
 two numbers per item that the order workbooks do not carry:
 
   - `weight_lb_per_sqft` — the item's weight rate, in pounds of yarn per

@@ -1,28 +1,52 @@
-# Leftover Batch Utilisation and Bobbin-Level Planning — Next Phase Context
+# Leftover Batch Utilisation and Bobbin-Level Planning
 
-Status: **context captured, not yet implemented**. This document records the
-decisions, cost-model extensions, and domain rules agreed in planning
-discussion (July 2026), building on `docs/batch_assignment_context.md`. It is
-the working brief for the next phase; nothing here is built yet.
+- **Purpose:** working brief for the current phase — cross-order batch
+  sharing, per-bobbin planning, and the cost-model extensions they need.
+- **Audience:** planners agreeing the approach; developers building the
+  order-pool phase.
+- **Scope:** everything downstream of within-order sequencing: leftover
+  batches, per-bobbin feasibility and simulation, cross-order seams, and
+  the data still to be collected from the floor.
+- **Depends on:** `docs/batch_assignment_context.md` (domain model this
+  builds on) and `docs/optimisation_plan_Stage1.md` (the cost model §3
+  generalises). See `docs/README.md` for the full document map.
+- **Status:** decisions and cost-model extensions agreed in planning
+  discussion (July 2026); first steps implemented (§11), the cross-order
+  pipeline not yet built.
 
 ## 1. The challenge
 
-After the rolls of an order are manufactured, yarn is usually left over from
-the batches assigned to its items. Because those bobbins are already hanging
-on the creel, planners today try to find another order whose item
-requirements the leftover can satisfy, and tuft rolls from that order next.
-This saves creel changes (the item is already threaded) and reduces waste in
-material and movement.
+The goal of this phase — and of the project — is to **increase
+manufacturing throughput**. Downtime is the main lever: the tufting
+machine only produces while it runs, so fewer stops and fewer bobbins
+changed per stop translate directly into output. Optimising the usage of
+leftover yarn is beneficial and falls out of the same planning, but it is
+a secondary benefit, not the main goal.
+
+After the rolls of an order are manufactured, yarn is usually left over
+from the batches assigned to its items, and those bobbins are still
+hanging on the creel. The floor's response today is to jump between
+orders based on what is on the creel: rather than following the planned
+schedule, operators pick whichever order's rolls need the fewest bobbin
+changes given the current threading, and tuft those next. The intent is
+exactly right — they are trying to minimise downtime — but judging
+bobbin-change counts across the open order book by eye is close to
+impossible, so the result is approximate, and the schedule as planned is
+not the schedule that runs.
 
 Done reactively — on the floor, after a roll finishes — this creates a
-carry-over effect: every reuse rewrites the schedule, invalidates a batch
+carry-over effect: every jump rewrites the schedule, invalidates a batch
 assignment made earlier, and makes it hard to track which rolls are tufted
 and which are pending. The schedule is ever-changing.
 
-A second complication: a creel change occurs even between two *identical*
-layouts if their items come from different batches, because an item within
-an order must come from exactly one batch. Colour match alone (the current
-combined-mode assumption) is therefore not sufficient across orders.
+A second complication: colour match alone (the current combined-mode
+assumption) is not sufficient across orders. What hangs at a creel
+position is an **item** — a yarn type + colour combination with its own
+item number (`docs/batch_assignment_context.md` §3) — so two positions
+only avoid a change if the item numbers match, not merely the colours.
+And even matching items force a creel change when they come from
+different batches, because an item within an order must come from exactly
+one batch. Cross-order identity is therefore (item, batch) — see §3.1.
 
 ## 2. Decision: planned sharing, not reactive reuse
 
@@ -42,6 +66,11 @@ Three options were considered:
    material and creel savings as reactive reuse, decided once at planning
    time and frozen into the schedule.
 
+Planned sharing computes what the floor already tries to approximate by
+eye — the order-to-order transition that changes the fewest bobbins — and
+does it across the whole order pool at once, producing a schedule that
+captures the downtime savings *and* can actually be followed.
+
 The key observation making this possible: the feasibility test for reuse is
 static. Because of the one-batch-per-item-per-order rule, a leftover is only
 usable if it covers the receiving order's *full* item requirement — a
@@ -58,6 +87,13 @@ The Phase 1 cost model (positional inch mismatch on colour) needs two
 extensions for cross-order sequencing.
 
 ### 3.1 Identity is (item, batch), not colour
+
+Colour is only part of what identifies a threaded position. The unit that
+hangs there is an item — a yarn type + colour combination with a unique
+item number (`docs/batch_assignment_context.md` §3). Within a single
+order, colour is a safe shorthand: every colour segment implies all three
+yarn types, and each item carries exactly one batch. Across orders neither
+holds, so the full identity is needed.
 
 A position matches only if both the item and the batch are the same. This
 captures the batch rule automatically: batch 101A → batch 102B of the same
@@ -105,7 +141,9 @@ floor (they are questions 1–3 and 13 in §9):
 
 The stated business objective (CEO direction) is that tufting should be a
 long-running process: minimise the number of stops, so runs between creel
-changes are as long as possible.
+changes are as long as possible. This is the throughput goal of §1 stated
+as a model requirement — downtime is where throughput is lost, and stops
+are where downtime happens.
 
 A structural fact shapes where this can be won. **Within a single order,
 stop count is invariant**: once identical layouts are clustered (which the

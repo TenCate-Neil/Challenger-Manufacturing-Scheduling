@@ -2,8 +2,9 @@
 """
 Batch-aware bobbin ledger over an optimised sequence.
 
-This is the next slice of the leftover-batch plan (`Next Phase To Be Done/
-leftover_batch_utilisation_and_bobbin_planning.md`, sections 2, 7 and 8):
+This is the next slice of the leftover-batch plan
+(`docs/leftover_batch_utilisation_and_bobbin_planning.md`, sections 2, 7
+and 8):
 given the batches available in inventory, assign one batch to each of the
 order's items and then simulate the whole optimised run bobbin by bobbin, so
 that at order end the leftover is a known quantity — how many untouched full
