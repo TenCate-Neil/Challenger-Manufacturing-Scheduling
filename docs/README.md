@@ -59,7 +59,7 @@ The pipeline, in dependency order, with implementation status:
 | Bobbin usage simulation | Per-bobbin depletion along the optimised sequence; planned swap points | `leftover_batch_utilisation_and_bobbin_planning.md` §6–§7, §11 | Implemented first cut (`bobbin_usage.py`, `data/item_bobbin_data.csv`) |
 | Batch ledger | Assigns one batch per item from a batch inventory workbook; simulates the run and predicts the leftover end state | `leftover_batch_utilisation_and_bobbin_planning.md` §11 | Implemented interim shape (`batch_ledger.py`) |
 | Order pool + batch availability | All open orders in one place; batch inventory from Business Central | `batch_assignment_context.md` §6 | Not built |
-| Cross-order scheduling with planned batch sharing | Roll-level pooled sequencing on (item, batch) identity, each roll tagged with its order; batch assignment is chosen by the optimiser to minimise total bobbin changes (maximal sharing); multiple tufting stations each seeded from its last roll of the previous week | `leftover_batch_utilisation_and_bobbin_planning.md` §2–§3 | Not built — the current phase's brief |
+| Cross-order scheduling with planned batch sharing | Roll-level pooled sequencing on (colour, 5040 batch) identity with a tiered per-inch cost, each roll tagged with its order; batch assignment is chosen by the optimiser to minimise total bobbin changes (maximal sharing); multiple tufting stations each seeded from its last roll of the previous week | `leftover_batch_utilisation_and_bobbin_planning.md` §2–§3 | Not built — the current phase's brief |
 
 ## 4. What identifies a threaded position
 
@@ -74,10 +74,12 @@ scope allows:
   This is the unit of demand, inventory, and batch assignment. Colour
   match alone is not sufficient across orders; the item numbers must
   match.
-- **(item, batch)** — the full cross-order identity. Even matching items
-  force a creel change when they come from different batches, because an
-  item within an order must come from exactly one batch. Cross-order
-  sequencing and batch sharing work at this level.
+- **(colour, 5040 batch)** — the full cross-order identity. Only the
+  5040 XP+ (6Pin) yarn is batch-sensitive; MF TXT 7200/10 and SXT 5400/6
+  may mix across batches. A colour-matched position whose 5040 batch
+  differs changes a third of its bobbins (just the 5040 ones); sharing
+  the 5040 batch takes it to zero. Cross-order sequencing and batch
+  sharing work at this level.
 
 ## 5. Document map
 
@@ -99,7 +101,7 @@ Dependencies between the documents:
 - `leftover_batch_utilisation_and_bobbin_planning.md` builds on both: it
   extends the batch model of `batch_assignment_context.md` (§4 → per-bobbin
   feasibility) and the cost model of `optimisation_plan_Stage1.md`
-  (colour identity → (item, batch) identity). Its open questions §10
+  (colour identity → (colour, 5040 batch) identity). Its open questions §10
   carry forward and sharpen `batch_assignment_context.md` §7.
 
 Suggested reading order for someone new: this file →

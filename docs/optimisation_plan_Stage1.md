@@ -202,7 +202,8 @@ confirmed and folded into the assumptions above.
   sequence from its current threading (a known start state — the last roll of
   the previous week's schedule) rather than a fresh start. The planning for
   this phase lives in `docs/leftover_batch_utilisation_and_bobbin_planning.md`,
-  which extends the cost model here to (item, batch) identity.
+  which extends the cost model here to (colour, 5040 batch) identity with a
+  tiered per-inch cost.
 
 ## 10. Delivery approach
 

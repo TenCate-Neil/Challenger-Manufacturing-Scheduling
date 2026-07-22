@@ -45,9 +45,11 @@ assumption) is not sufficient across orders. What hangs at a creel
 position is an **item** — a yarn type + colour combination with its own
 item number (`docs/batch_assignment_context.md` §3) — so two positions
 only avoid a change if the item numbers match, not merely the colours.
-And even matching items force a creel change when they come from
-different batches, because an item within an order must come from exactly
-one batch. Cross-order identity is therefore (item, batch) — see §3.1.
+And even a colour match forces a partial creel change when the
+**5040 XP+ (6Pin)** yarn — the one batch-sensitive yarn type — comes from
+different batches, because a 5040 item within an order must come from
+exactly one batch. Cross-order identity is therefore
+(colour, 5040 batch) — see §3.1.
 
 ## 2. Decision: planned sharing, not reactive reuse
 
@@ -97,7 +99,7 @@ to hold. Rush orders entering mid-window either wait or trigger a re-plan.
 The Phase 1 cost model (positional inch mismatch on colour) needs two
 extensions for cross-order sequencing.
 
-### 3.1 Identity is (item, batch), not colour
+### 3.1 Identity is (colour, 5040 batch), not colour alone
 
 Colour is only part of what identifies a threaded position. The unit that
 hangs there is an item — a yarn type + colour combination with a unique
@@ -106,12 +108,22 @@ order, colour is a safe shorthand: every colour segment implies all three
 yarn types, and each item carries exactly one batch. Across orders neither
 holds, so the full identity is needed.
 
-A position matches only if both the item and the batch are the same. This
-captures the batch rule automatically: batch 101A → batch 102B of the same
-item is a full mismatch, exactly like a different item — the bobbins come
-off either way. Layout signatures in combined mode must incorporate batch
-identity. Batch assignment and cross-order sequencing are therefore coupled:
-shared batches are what create the zero-cost seams between orders.
+Batch sensitivity is not uniform across the three yarn types (confirmed
+in planning discussion, July 2026): only the **5040 XP+ (6Pin)** yarn
+cannot mix batches. The other two, MF TXT 7200/10 and SXT 5400/6, may mix
+across batches freely — all three feed into the same tufted inch, but
+batch mixing in those two is not visible in the finished field. The full
+identity of a threaded position is therefore **(colour, batch of the
+5040 XP+ item)**: the two batch-insensitive yarn types never force a
+change at a colour-matched position.
+
+Batch 101A → batch 102B of the same 5040 item is consequently *not* a
+full mismatch: only the 5040 bobbins come off — a third of the position's
+bobbins — while the other two yarn types keep hanging (§3.2 for the
+tiered cost). Layout signatures in combined mode must incorporate the
+5040 batch identity. Batch assignment and cross-order sequencing remain
+coupled: a shared 5040 batch is what turns a colour-matched seam from a
+one-third change into a zero-cost one.
 
 The coupling also runs in the deciding direction: batch assignment is not
 a pre-step with its own separate objective. The optimisation algorithm
@@ -124,8 +136,8 @@ so the shared positions stay threaded across the seam (§3.4).
 
 The one-batch-per-item-per-order rule also works in the solver's favour:
 it shrinks the feasible space. A zero-change run can only extend across
-rolls whose positions carry the same (item, batch) — even an exactly
-similar item is a changeover if it comes from a different batch — so a
+rolls whose positions carry the same (colour, 5040 batch) — even an exact
+colour match is a one-third changeover if the 5040 batch differs — so a
 run can only be so long, and far fewer candidate sequences are worth
 considering.
 
@@ -138,22 +150,32 @@ existing bobbin to another creel location costs the same as removing the
 old bobbin and mounting a new one** — either way the yarn is cut and the
 new bobbin's yarn is tied to the yarn feeding the tufter. Under that
 equality the tiers collapse and the cost of a transition is simply the
-number of bobbins changed:
+number of bobbins changed. An inch of roll width carries 3 bobbins per
+yarn type — 9 in total (§6) — and the per-yarn-type batch rule (§3.1)
+gives each inch position three possible states in a transition:
 
 ```
-cost(A → B) = bobbins changed = 3 × mismatched inches, on (item, batch) identity
+per inch position, cost(A → B) =
+  9 bobbins   colour differs                    (all three yarn types change)
+  3 bobbins   colour same, 5040 batch differs   (only the 5040 XP+ bobbins)
+  0 bobbins   colour and 5040 batch both match
 ```
 
-This is exactly the existing Phase 1 cost model with two adjustments, only
-one of which is substantive:
+This is the existing Phase 1 cost model with two adjustments, only one of
+which is substantive:
 
-- identity is (item, batch) instead of colour;
-- the ×3 is a constant scale factor — it changes time estimates but never
-  which sequence wins, so the optimiser can keep working in inches.
+- per-inch mismatch is two-tier — weight 3 for a colour change, weight 1
+  for a 5040-batch-only change — instead of binary;
+- the remaining ×3 is a constant scale factor: it changes time estimates
+  but never which sequence wins, so the optimiser can keep working in
+  inches, with a colour-changed inch costing 1 and a batch-only-changed
+  inch costing ⅓.
 
-Everything already built survives verbatim: the distance matrix, Held–Karp,
-2-opt/Or-opt, symmetry (no asymmetric TSP), and the MST lower bound.
-Combined mode needs only batch-aware layout signatures.
+Within a single order the batch tier never fires (each item has exactly
+one batch), so Phase 1 behaviour — and everything already built — is
+unchanged: the distance matrix, Held–Karp, 2-opt/Or-opt, symmetry (both
+tiers are symmetric), and the MST lower bound all survive. Combined mode
+needs 5040-batch-aware layout signatures and the tiered per-inch weight.
 
 One assumption carries this simplification and must be verified with the
 floor (questions 1–3 in §9):
@@ -213,16 +235,25 @@ objective is stated in.
 
 At a seam between orders the saving is binary before it is linear. If the
 shared item sits at the **same creel positions** in both orders' rolls and
-comes from the shared batch, the seam costs zero and the machine keeps
-running — the actual prize. Any mismatch means a stop regardless; sharing
-then only reduces the number of bobbins changed at that stop.
+comes from the shared 5040 batch, the seam costs zero and the machine
+keeps running — the actual prize. Any mismatch means a stop regardless;
+sharing then only reduces the number of bobbins changed at that stop.
+
+The per-yarn-type batch rule (§3.1) makes colour-matched seams cheap even
+*without* sharing. Worked example: a roll of 182" field green followed by
+the same layout from another order with a different 5040 batch changes
+only the 5040 bobbins — 182 × 3 = 546 instead of 182 × 9 = 1,638; the
+MF TXT 7200/10 and SXT 5400/6 bobbins stay hanging. Sharing the 5040
+batch removes the remaining third and takes the seam to zero. So layout
+alignment alone earns two-thirds of the saving, and batch sharing earns
+the rest — plus the run-through (no stop at all).
 
 A seam does not have to sit at the end of an order. The pool is sequenced
 at the **roll level**: orders are broken down into their rolls, and the
 one-batch-per-item-per-order rule is a constraint on those rolls, not an
 instruction to finish one order before starting the next. In practice the
-constraint pulls an order's rolls together — they share (item, batch)
-identity at their positions, so transitions among them are the cheap
+constraint pulls an order's rolls together — they share (colour,
+5040 batch) identity at their positions, so transitions among them are the cheap
 ones — but contiguity is an emergent outcome, not a hard rule. Rolls of
 different orders may interleave wherever that changes fewer bobbins; an
 order's rolls will most likely end up sequential, or at least in close
@@ -261,9 +292,9 @@ one measure:
    with margin and the per-bobbin checks of §4–§7, evaluated against the
    planned manufacturing order of the two orders (§7).
 
-They combine because the (item, batch) combination is what determines the
-changeover cost, and that cost is computed from the layout alignment —
-the number of inches that change. **Spec compatibility (product, gauge,
+They combine because the (colour, 5040 batch) combination is what
+determines the changeover cost, and that cost is computed from the layout
+alignment — the inches that change, weighted per the two tiers of §3.2. **Spec compatibility (product, gauge,
 pile height) is not a gate**: a spec change is a very short stop made on
 the tufting machine itself, not creel work, so it does not disqualify a
 pair. This refines the Stage 1 plan's expectation (its assumption 4) that
@@ -325,14 +356,23 @@ sort position demands descending, sort bobbin remainders descending, pair
 them off — feasible iff the k-th largest bobbin covers the k-th largest
 demand.
 
+The bind is on the 5040 XP+ items. For the two batch-insensitive yarn
+types (§3.1) the spare pool spans *every* batch of the item — swaps and
+splices may draw from any of them — so their feasibility is usually
+settled by the aggregate checks alone; the per-bobbin matching above is
+what constrains the 5040 assignment.
+
 ## 5. Rules confirmed from the floor
 
 Two rules shape how the per-bobbin problem is handled:
 
-1. **Within-batch splicing is allowed; cross-batch is not.** A new bobbin
-   from the *same batch* can be tied in; a bobbin from a different batch
-   cannot. So a single bobbin need not cover a position's full demand, as
-   long as same-batch spares exist for planned swaps.
+1. **Within-batch splicing is allowed; cross-batch is not — for the
+   5040 XP+ (6Pin) yarn.** A new bobbin from the *same batch* can be tied
+   in; a 5040 bobbin from a different batch cannot. The two
+   batch-insensitive yarn types (§3.1) may splice across batches freely.
+   So a single bobbin need not cover a position's full demand, as long as
+   spares exist for planned swaps — same-batch spares for 5040, any batch
+   for the other two.
 2. **Bobbins are never allowed to run dry mid-roll.** Replacement is
    proactive. Since bobbins are not tracked today, this is currently
    managed by operator judgement.
@@ -418,7 +458,8 @@ partials. Under this policy, feasibility is checked against the planned
 manufacturing order of the two orders: simulate the first order's
 consumption (§6), take the predicted remainders — partials included — and
 run the per-position matching check of §4 for the second order, with
-same-batch spares covering the planned swaps. This check is
+same-batch spares covering the planned swaps (any-batch spares for the
+two batch-insensitive yarn types, §3.1). This check is
 sequence-dependent where the conservative one is not: whether enough is
 left depends on which order runs first, and the batch assignment must be
 re-checked if the planned sequence changes.
@@ -492,24 +533,16 @@ and c_new directly.
     tracks, even informally, which bobbins have how much yarn left. §5
     assumes bobbins are not tracked today; this checks that assumption
     and tells us what the printed swap plan must replace.
-14. Whether the one-batch-per-item rule binds all three yarn types
-    equally, or whether two of the three yarn types can share across
-    batches. If some yarn types tolerate batch mixing, batch identity —
-    and the (item, batch) mismatch cost — applies per yarn type rather
-    than per inch of all three, which loosens feasibility and lowers seam
-    costs materially (§3.1; `docs/batch_assignment_context.md` §4).
-15. Whether a bobbin that runs dry can be tied over smoothly — one cone's
+14. Whether a bobbin that runs dry can be tied over smoothly — one cone's
     end tied to the next cone's beginning so the transition happens
     without stopping. If so, planned run-dry tie-overs become an
     alternative to the proactive swaps of §5 rule 2.
 
 Priority if limited: items 1–3 (they verify the assumption the simplified
-cost model rests on, §3.2), item 10 (leftover accuracy — the go/no-go
-evidence for planned sharing and for the splicing-aware policy, §7), and
-item 14 (per-yarn-type batch sensitivity — it changes the shape of the
-batch constraint itself).
+cost model rests on, §3.2) and item 10 (leftover accuracy — the go/no-go
+evidence for planned sharing and for the splicing-aware policy, §7).
 
-Two earlier asks are closed and kept for the record:
+Three earlier asks are closed and kept for the record:
 
 - *How many people work a creel change* — dropped: staffing is not
   modelled (§3.4); the objective is the optimal manufacturing ordering.
@@ -517,6 +550,10 @@ Two earlier asks are closed and kept for the record:
   decision: the cost model carries no per-stop penalty (§3.3). A measured
   per-stop overhead would still refine absolute downtime predictions, but
   it no longer decides the model.
+- *Whether all three yarn types are equally batch-sensitive* — answered
+  (July 2026): only 5040 XP+ (6Pin) cannot mix batches; MF TXT 7200/10
+  and SXT 5400/6 can. Folded into the identity and cost model as the
+  tiered per-inch weight (§3.1–§3.2).
 
 ## 10. Open questions
 
@@ -542,11 +579,6 @@ Two earlier asks are closed and kept for the record:
 7. Station assignment (§3.5): how rolls are allocated across the available
    tufting stations, and how each station's seeded start state interacts
    with the pooled sequence.
-8. Whether batch identity binds all three yarn types equally (§9 item 14).
-   If two of the yarn types can share across batches, the one-batch rule —
-   and the (item, batch) mismatch cost — is enforced per yarn type, not
-   for the full inch of all three, and both feasibility and seam costs
-   change accordingly.
 
 ## 11. First step — implemented
 
@@ -595,6 +627,10 @@ Since then, the batch ledger is implemented (`batch_ledger.py`, July 2026):
 
 Not yet implemented from this document: the live Business Central
 connection, the sharing feasibility pipeline across orders (§3.4, §7),
-batch-aware layout signatures in combined mode with each roll tagged by
-its source order (§3.1, §3.4), and multi-station scheduling seeded from
-each tufting station's last roll (§3.5).
+5040-batch-aware layout signatures with the tiered per-inch cost in
+combined mode and each roll tagged by its source order (§3.1–§3.2, §3.4),
+relaxing the ledger's one-batch rule for the two batch-insensitive yarn
+types (§3.1 — `batch_ledger.py` currently enforces it for all items,
+which is stricter than needed for MF TXT 7200/10 and SXT 5400/6), and
+multi-station scheduling seeded from each tufting station's last roll
+(§3.5).

@@ -61,10 +61,13 @@ batch — never split across two**: extrusion runs of the same item are not
 always identical, and mixing batches produces visible differences in the
 finished field.
 
-Whether this rule binds all three yarn types with equal force is being
-verified with manufacturing (leftover-batch document §9 item 14): two of
-the three yarn types may tolerate sharing across batches. The rule stands
-for all three until that is answered.
+This rule binds the three yarn types differently (confirmed in planning
+discussion, July 2026): only **5040 XP+ (6Pin)** cannot mix batches.
+MF TXT 7200/10 and SXT 5400/6 may draw on several batches within an
+order — batch mixing in those two is not visible in the finished field —
+so their availability is checked in aggregate across batches, and the
+one-batch constraint below binds the 5040 items. The cost consequences
+are worked out in the leftover-batch document §3.1–§3.2.
 
 The assigned batch must satisfy two independent constraints. Together they
 cover the width/length trade-off — bobbins cover breadth, pounds cover depth
