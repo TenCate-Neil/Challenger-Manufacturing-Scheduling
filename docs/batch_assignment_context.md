@@ -61,6 +61,11 @@ batch — never split across two**: extrusion runs of the same item are not
 always identical, and mixing batches produces visible differences in the
 finished field.
 
+Whether this rule binds all three yarn types with equal force is being
+verified with manufacturing (leftover-batch document §9 item 14): two of
+the three yarn types may tolerate sharing across batches. The rule stands
+for all three until that is answered.
+
 The assigned batch must satisfy two independent constraints. Together they
 cover the width/length trade-off — bobbins cover breadth, pounds cover depth
 (a narrow stripe on very long rolls needs few bobbins but a lot of yarn):

@@ -228,12 +228,15 @@ different orders may interleave wherever that changes fewer bobbins; an
 order's rolls will most likely end up sequential, or at least in close
 proximity, without being forced to be.
 
-Roll-level pooling requires every roll to carry its **order identity**.
-Within one workbook a roll is identified by its `navision_lot` (unique
-within the order — Stage 1 plan, assumption 6), but that uniqueness is
-only checked per order. In the pool each roll must be tagged with a
-stable order id — the workbook's PO number, or failing that the source
-file — alongside its lot number. That link is what makes the
+Roll-level pooling requires every roll to carry its **order identity**,
+and the `navision_lot` number already encodes it: the first part is
+shared by every roll of the order and the second part distinguishes the
+rolls — M2603558-03, M2603558-04, M2603558-05, M2603558-06 are four
+rolls of one order. The pool can therefore derive each roll's order id
+from its lot prefix and cross-check it against the workbook the roll
+came from (PO number / source file); extraction should verify that all
+rolls in a workbook share one prefix and flag any exception. That link
+is what makes the
 one-batch-per-item-per-order rule checkable per roll: a roll's demand for
 an item is served by the batch assigned to (its order, that item), so all
 of an order's rolls tuft the item from the same batch no matter where in
@@ -460,7 +463,10 @@ and c_new directly.
 3. If fetched in advance, how the timing of replacing a bobbin compares
    with mounting into an empty position — including the time to place a
    removed bobbin on a storage rack for inventory or another tufter.
-4. How much of a batch is typically left over after an order.
+4. How much of a batch is typically left over after an order, and its
+   composition — mostly untouched full bobbins, or mostly semi-used
+   partials (this decides how much the conservative full-bobbins-only
+   pairing policy of §7 gives away).
 5. How often orders are mixed today (leftover of one order's batch used to
    tuft another order's rolls), and whether that is usually one item or a
    mix.
@@ -468,8 +474,10 @@ and c_new directly.
    bobbin variation.
 7. The swap margin: how much yarn must remain on a bobbin before an
    operator will start the next roll on it.
-8. What happens to partial bobbins today — discarded, kept creel-side,
-   returned to inventory (quantifies the waste the simulator would reduce).
+8. What happens to bobbins taken off the creel today — where they are
+   stored, whether they are often put back on or discarded, and whether
+   partials are kept creel-side or returned to inventory (quantifies the
+   waste the simulator would reduce).
 9. A few whole-changeover timings (total minutes, inches changed, bobbins
    moved vs new) to validate the linear cost model.
 10. Leftover accuracy: for several recent orders, computed leftover vs
@@ -477,13 +485,29 @@ and c_new directly.
 11. Batch data shape from Business Central: per batch — item number, batch
     id, available lb, bobbin count, receipt date; whether bobbin count is
     tracked per batch; export vs live query, and refresh frequency.
-12. Station facts (§3.5): how many tufting stations are available, whether
-    their creels are identical, and whether hanging bobbins can move
-    between stations.
+12. Station facts (§3.5): how many tufting stations are available and how
+    many of them run Pivot, whether their creels are identical, and
+    whether hanging bobbins can move between stations.
+13. How removed bobbins are identified when re-creeling — whether anyone
+    tracks, even informally, which bobbins have how much yarn left. §5
+    assumes bobbins are not tracked today; this checks that assumption
+    and tells us what the printed swap plan must replace.
+14. Whether the one-batch-per-item rule binds all three yarn types
+    equally, or whether two of the three yarn types can share across
+    batches. If some yarn types tolerate batch mixing, batch identity —
+    and the (item, batch) mismatch cost — applies per yarn type rather
+    than per inch of all three, which loosens feasibility and lowers seam
+    costs materially (§3.1; `docs/batch_assignment_context.md` §4).
+15. Whether a bobbin that runs dry can be tied over smoothly — one cone's
+    end tied to the next cone's beginning so the transition happens
+    without stopping. If so, planned run-dry tie-overs become an
+    alternative to the proactive swaps of §5 rule 2.
 
 Priority if limited: items 1–3 (they verify the assumption the simplified
-cost model rests on, §3.2) and item 10 (leftover accuracy — the go/no-go
-evidence for planned sharing and for the splicing-aware policy, §7).
+cost model rests on, §3.2), item 10 (leftover accuracy — the go/no-go
+evidence for planned sharing and for the splicing-aware policy, §7), and
+item 14 (per-yarn-type batch sensitivity — it changes the shape of the
+batch constraint itself).
 
 Two earlier asks are closed and kept for the record:
 
@@ -518,6 +542,11 @@ Two earlier asks are closed and kept for the record:
 7. Station assignment (§3.5): how rolls are allocated across the available
    tufting stations, and how each station's seeded start state interacts
    with the pooled sequence.
+8. Whether batch identity binds all three yarn types equally (§9 item 14).
+   If two of the yarn types can share across batches, the one-batch rule —
+   and the (item, batch) mismatch cost — is enforced per yarn type, not
+   for the full inch of all three, and both feasibility and seam costs
+   change accordingly.
 
 ## 11. First step — implemented
 
