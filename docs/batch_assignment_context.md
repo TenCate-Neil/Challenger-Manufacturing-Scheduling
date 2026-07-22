@@ -131,11 +131,13 @@ open orders to assigned batches.
    connection or an export, and the exact fields available per batch
    (item number, batch id, available lb, bobbin count), is still to be
    decided.
-2. **Assignment objective.** "Optimally assign" needs a defined objective
-   when several feasible assignments exist — e.g. minimise leftover batch
-   remnants, preserve large batches for large orders, or first-fit by ship
-   date. To be agreed with the planners. Sharpened in the leftover-batch
-   document §10 (creel changes saved vs fragmentation vs discarded waste).
+2. **Assignment objective.** Decided in the leftover-batch document
+   (§3.1): the optimiser assigns batches to (order, item) pairs so the
+   pooled schedule needs the least number of bobbin changes — assignments
+   that let many orders share a batch where their roll layouts for that
+   item align. How secondary concerns (batch fragmentation,
+   discarded-partial waste) weigh against a marginal bobbin saving is
+   still open (leftover-batch document §10).
 3. **Combined mode semantics.** When several orders are joined into one run,
    is "one batch per item" enforced per original order or across the whole
    combined run? Carried forward in the leftover-batch document §10.

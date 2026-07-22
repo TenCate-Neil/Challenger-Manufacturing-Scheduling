@@ -113,6 +113,15 @@ off either way. Layout signatures in combined mode must incorporate batch
 identity. Batch assignment and cross-order sequencing are therefore coupled:
 shared batches are what create the zero-cost seams between orders.
 
+The coupling also runs in the deciding direction: batch assignment is not
+a pre-step with its own separate objective. The optimisation algorithm
+assigns batches to (order, item) pairs so that the pooled schedule needs
+the **least number of bobbin changes** — which is where batch sharing is
+maximised. Sharing pays exactly when both conditions hold at once: many
+orders' items can draw on the same batch (it covers their combined
+requirement), *and* their roll layouts for the shared item are similar,
+so the shared positions stay threaded across the seam (§3.4).
+
 The one-batch-per-item-per-order rule also works in the solver's favour:
 it shrinks the feasible space. A zero-change run can only extend across
 rolls whose positions carry the same (item, batch) — even an exactly
@@ -218,6 +227,18 @@ ones — but contiguity is an emergent outcome, not a hard rule. Rolls of
 different orders may interleave wherever that changes fewer bobbins; an
 order's rolls will most likely end up sequential, or at least in close
 proximity, without being forced to be.
+
+Roll-level pooling requires every roll to carry its **order identity**.
+Within one workbook a roll is identified by its `navision_lot` (unique
+within the order — Stage 1 plan, assumption 6), but that uniqueness is
+only checked per order. In the pool each roll must be tagged with a
+stable order id — the workbook's PO number, or failing that the source
+file — alongside its lot number. That link is what makes the
+one-batch-per-item-per-order rule checkable per roll: a roll's demand for
+an item is served by the batch assigned to (its order, that item), so all
+of an order's rolls tuft the item from the same batch no matter where in
+the pooled sequence they land, and no matter which rolls of other orders
+sit between them.
 
 Sharing a batch between two orders therefore only makes sense when their
 roll layouts align positionally (or overlap substantially — a long common
@@ -479,9 +500,13 @@ Two earlier asks are closed and kept for the record:
 2. Floor confirmation of the assumption behind the simplified cost model
    (§3.2): move ≈ remove-plus-mount timing. (The per-stop penalty question
    is resolved — no fixed stopping cost, §3.3.)
-3. The assignment objective when several feasible sharings exist: creel
-   changes saved vs batch fragmentation vs discarded-partial waste
-   (sharpens open question 2 of `docs/batch_assignment_context.md` §7).
+3. Weighing the secondary concerns in batch assignment. The primary
+   objective is decided (§3.1): the optimiser assigns batches to
+   (order, item) pairs so the pooled schedule needs the least number of
+   bobbin changes — maximal sharing where roll layouts align. Still open
+   is how batch fragmentation and discarded-partial waste weigh against a
+   marginal bobbin saving (sharpens open question 2 of
+   `docs/batch_assignment_context.md` §7).
 4. Whether combined-mode "one batch per item" is enforced per original
    order or across a combined run (carried over from
    `docs/batch_assignment_context.md` §7).
@@ -541,5 +566,6 @@ Since then, the batch ledger is implemented (`batch_ledger.py`, July 2026):
 
 Not yet implemented from this document: the live Business Central
 connection, the sharing feasibility pipeline across orders (§3.4, §7),
-batch-aware layout signatures in combined mode (§3.1), and multi-station
-scheduling seeded from each tufting station's last roll (§3.5).
+batch-aware layout signatures in combined mode with each roll tagged by
+its source order (§3.1, §3.4), and multi-station scheduling seeded from
+each tufting station's last roll (§3.5).

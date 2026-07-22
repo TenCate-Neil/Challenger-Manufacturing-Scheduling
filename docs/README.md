@@ -59,7 +59,7 @@ The pipeline, in dependency order, with implementation status:
 | Bobbin usage simulation | Per-bobbin depletion along the optimised sequence; planned swap points | `leftover_batch_utilisation_and_bobbin_planning.md` §6–§7, §11 | Implemented first cut (`bobbin_usage.py`, `data/item_bobbin_data.csv`) |
 | Batch ledger | Assigns one batch per item from a batch inventory workbook; simulates the run and predicts the leftover end state | `leftover_batch_utilisation_and_bobbin_planning.md` §11 | Implemented interim shape (`batch_ledger.py`) |
 | Order pool + batch availability | All open orders in one place; batch inventory from Business Central | `batch_assignment_context.md` §6 | Not built |
-| Cross-order scheduling with planned batch sharing | Roll-level pooled sequencing on (item, batch) identity, seams anywhere in the pool, multiple tufting stations each seeded from its last roll of the previous week | `leftover_batch_utilisation_and_bobbin_planning.md` §2–§3 | Not built — the current phase's brief |
+| Cross-order scheduling with planned batch sharing | Roll-level pooled sequencing on (item, batch) identity, each roll tagged with its order; batch assignment is chosen by the optimiser to minimise total bobbin changes (maximal sharing); multiple tufting stations each seeded from its last roll of the previous week | `leftover_batch_utilisation_and_bobbin_planning.md` §2–§3 | Not built — the current phase's brief |
 
 ## 4. What identifies a threaded position
 
