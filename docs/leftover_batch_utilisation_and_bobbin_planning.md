@@ -492,6 +492,24 @@ Refinements:
    leftover batch saves a creel change but may cost N lbs of discarded
    partials; the trade is weighed, not assumed.
 
+### 7.1 Future project (noted, out of scope): numbered creel map
+
+A later project (noted July 2026) will map every inch of roll width to
+physical bobbin numbers on the creel — e.g. the first inch at the front
+of the tufting machine is bobbins 1–9 — and record which numbered creel
+locations hold which yarn type.
+
+This is a presentation-layer translation, not a model change: the
+pipeline already computes everything per inch position from the front of
+the machine (the cost model's mismatch, the depletion groups, the swap
+points), so once the numbering scheme exists, inch positions translate
+directly into named bobbins. The payoff is a schedule whose changeover
+and swap instructions are exact — "change bobbins 511–537", not "re-thread
+inches 57–65" — making creel changes unambiguous to execute and auditable
+afterwards. Prerequisite: the numbering scheme per station, which ties
+into the station facts of §3.5 (whether creels are identical across
+tufters).
+
 ## 8. Buffers and uncertainty
 
 Planning currently applies an informal buffer of roughly 10% (e.g. 900 →
