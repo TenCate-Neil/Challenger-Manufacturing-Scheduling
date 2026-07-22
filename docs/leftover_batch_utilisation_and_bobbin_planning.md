@@ -125,6 +125,20 @@ tiered cost). Layout signatures in combined mode must incorporate the
 coupled: a shared 5040 batch is what turns a colour-matched seam from a
 one-third change into a zero-cost one.
 
+Telling the sensitive items apart is a data lookup, not a heuristic.
+Every yarn type + colour combination is an item number
+(`docs/batch_assignment_context.md` §3), so a **catalogue of all item
+numbers with their yarn type** identifies exactly which items are
+5040 XP+ (6Pin). That catalogue already has a home:
+`data/item_bobbin_data.csv` carries `item_number, yarn_type, color_code`
+alongside the weights the simulator needs — populating it across all
+items delivers the sensitivity flag, the layout join (colour code), and
+the consumption rates in one table. The workbook's Yarn SKUs block gives
+a per-order cross-check, since it lists each order's SKUs under their
+yarn type. If products with other batch-sensitive yarns appear later, an
+explicit per-yarn-type sensitivity flag would replace inferring it from
+the 5040 name.
+
 The coupling also runs in the deciding direction: batch assignment is not
 a pre-step with its own separate objective. The optimisation algorithm
 assigns batches to (order, item) pairs so that the pooled schedule needs
@@ -585,11 +599,13 @@ Three earlier asks are closed and kept for the record:
 The per-item weight data and a first cut of the consumption model are
 implemented:
 
-- `data/item_bobbin_data.csv` maps each item number to its weight in lb per
-  square foot and its fresh bobbin weight from extrusion. It is edited
-  directly on GitHub; it is seeded with item 121051 (5040 XP+ (6Pin), FG,
-  0.04831 lb/sqft) and the remaining items and fresh bobbin weights are to
-  be filled in.
+- `data/item_bobbin_data.csv` maps each item number to its yarn type,
+  colour code, weight in lb per square foot and fresh bobbin weight from
+  extrusion. It is edited directly on GitHub; it is seeded with item
+  121051 (5040 XP+ (6Pin), FG, 0.04831 lb/sqft) and the remaining items
+  and fresh bobbin weights are to be filled in. Once populated across all
+  item numbers it doubles as the item catalogue of §3.1 — the yarn-type
+  column is what identifies the batch-sensitive 5040 XP+ items.
 - `bobbin_usage.py` computes, per matched item, each roll's consumption per
   bobbin (`w × length_ft / 36`, §6) and the depletion along the optimised
   sequence, tracked per inch position from the front of the machine (fixed
